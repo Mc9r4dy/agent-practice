@@ -237,7 +237,7 @@ Expected: 普通 fast-forward push 成功；不得使用 force。
 - Consumes: Task 1 的容器路径、Git 信任和 VS Code 设置。
 - Produces: 当前有效使用说明；原历史计划的补充状态；GUI 验收前仍未勾选的最终条件。
 
-- [ ] **Step 1: 写入失败文档契约测试**
+- [x] **Step 1: 写入失败文档契约测试**
 
 在 `tests/environment/test_repository_contract.py` 末尾增加：
 
@@ -274,7 +274,7 @@ def test_docs_describe_final_devcontainer_and_task_boundaries() -> None:
     assert "2026-07-20-devcontainer-root-git-integration-implementation.md" in old_plan
 ```
 
-- [ ] **Step 2: 运行目标测试并确认 RED**
+- [x] **Step 2: 运行目标测试并确认 RED**
 
 ```powershell
 docker exec -u vscode shuqi-workspace pytest -q `
@@ -283,7 +283,7 @@ docker exec -u vscode shuqi-workspace pytest -q `
 
 Expected: 1 failed，至少缺少新容器路径、全作用域 Git 命令和补充实施状态。
 
-- [ ] **Step 3: 更新环境设计当前架构**
+- [x] **Step 3: 更新环境设计当前架构**
 
 在 `05_开发环境与教学沙箱设计.md` 的 workspace 组件说明中写入以下当前条款：
 
@@ -302,7 +302,7 @@ Expected: 1 failed，至少缺少新容器路径、全作用域 Git 命令和补
 
 保持“VS Code 可以连接开发容器”复选框为 `[ ]`，直到 Task 4 GUI 验收通过。
 
-- [ ] **Step 4: 给旧实施计划增加补充状态，不改写历史**
+- [x] **Step 4: 给旧实施计划增加补充状态，不改写历史**
 
 在 `06_开发环境与教学沙箱实施计划.md` 的 Implementation Status 后增加：
 
@@ -315,7 +315,7 @@ Expected: 1 failed，至少缺少新容器路径、全作用域 Git 命令和补
 - 原 Task 8 Step 6 只有在新计划的容器自动验收与 VS Code GUI 验收均通过后才能完成。
 ```
 
-- [ ] **Step 5: 更新使用说明的当前路径、Git 和任务边界**
+- [x] **Step 5: 更新使用说明的当前路径、Git 和任务边界**
 
 在 `07_开发环境使用说明.md` 中写明：
 
@@ -357,7 +357,7 @@ Dev Containers 可能复制宿主 `.gitconfig`，并通过会话级 credential h
 当前 `/workspace` 挂载整个总仓库，因此 01 容器可以读写四个智能体的文件，四个智能体按同一开发信任域管理。真实生产凭据不得放入仓库目录；未来运行不可信代码或多人隔离开发时必须重新评审独立仓库、worktree 或外部秘密挂载。
 ```
 
-- [ ] **Step 6: 运行文档 GREEN 与全部测试**
+- [x] **Step 6: 运行文档 GREEN 与全部测试**
 
 ```powershell
 docker exec -u vscode shuqi-workspace pytest -q `
@@ -367,7 +367,7 @@ docker exec -u vscode shuqi-workspace pytest -q
 
 Expected: 目标测试 1 passed；全量测试 23 passed。
 
-- [ ] **Step 7: 记录日志并提交 Task 2**
+- [x] **Step 7: 记录日志并提交 Task 2**
 
 日志必须记录 RED/GREEN、三份文档的当前/历史边界、QuickReset/Rebuild 影响、未勾选 GUI 条件和回滚方式。
 
