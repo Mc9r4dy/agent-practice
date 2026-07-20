@@ -51,7 +51,7 @@
 - Consumes: `ROOT = Path(__file__).resolve().parents[2]`，其中 `ROOT` 是 01 智能体目录，`ROOT.parent` 是总仓库。
 - Produces: `/workspace` 根仓库挂载、`/workspace/01_db-security-ops-teaching-agent` 默认目录、精确 system `safe.directory`、VS Code 父仓库自动发现。
 
-- [ ] **Step 1: 记录未修改前基线**
+- [x] **Step 1: 记录未修改前基线**
 
 在 01 智能体目录运行：
 
@@ -63,7 +63,7 @@ docker exec -u vscode shuqi-workspace sh -lc 'git rev-parse --show-toplevel'
 
 Expected: `20 passed`；workdir 为 `/workspace`；挂载源为 01 子目录；Git 命令以“not a git repository”失败。把命令、退出码和输出摘要写入 `04_开发日志.md`，不得把失败写成通过。
 
-- [ ] **Step 2: 写入失败契约测试**
+- [x] **Step 2: 写入失败契约测试**
 
 在 `tests/environment/test_compose_contract.py` 顶部增加：
 
@@ -129,7 +129,7 @@ def test_devcontainer_limits_git_trust_and_discovers_parent_repo() -> None:
     assert all("*" not in line for line in safe_directory_lines)
 ```
 
-- [ ] **Step 3: 运行目标测试并确认 RED**
+- [x] **Step 3: 运行目标测试并确认 RED**
 
 ```powershell
 docker exec -u vscode shuqi-workspace pytest -q `
@@ -139,7 +139,7 @@ docker exec -u vscode shuqi-workspace pytest -q `
 
 Expected: 2 failed。失败应分别指向旧 `working_dir/workspaceFolder/volume` 和缺失的 `settings/safe.directory`；如果因语法或路径错误失败，先修正测试再继续。
 
-- [ ] **Step 4: 最小修改 Compose**
+- [x] **Step 4: 最小修改 Compose**
 
 把 `infra/compose.yaml` 的 workspace 片段改为：
 
@@ -157,7 +157,7 @@ Expected: 2 failed。失败应分别指向旧 `working_dir/workspaceFolder/volum
 
 MySQL service、端口、网络、env_file 与命名卷不得改动。
 
-- [ ] **Step 5: 最小修改 Dockerfile**
+- [x] **Step 5: 最小修改 Dockerfile**
 
 把 `.devcontainer/Dockerfile` 的 `RUN` 指令改为：
 
@@ -172,7 +172,7 @@ RUN apt-get update \
 
 不得使用 `safe.directory '*'`、`safe.directory=*` 或 `/workspace/*`。
 
-- [ ] **Step 6: 最小修改 Dev Container**
+- [x] **Step 6: 最小修改 Dev Container**
 
 把 `.devcontainer/devcontainer.json` 的 `workspaceFolder` 改为：
 
@@ -196,7 +196,7 @@ RUN apt-get update \
 }
 ```
 
-- [ ] **Step 7: 运行 GREEN 与回归测试**
+- [x] **Step 7: 运行 GREEN 与回归测试**
 
 ```powershell
 docker exec -u vscode shuqi-workspace pytest -q `
@@ -208,7 +208,7 @@ docker compose --project-name shuqi-db-agent --env-file .env -f infra/compose.ya
 
 Expected: 目标测试 2 passed；全量测试 22 passed；Compose 命令退出码 0。
 
-- [ ] **Step 8: 记录日志并提交 Task 1**
+- [x] **Step 8: 记录日志并提交 Task 1**
 
 向 `04_开发日志.md` 追加一条记录，至少包含基线、RED、三个配置文件的最小改动、GREEN、完整测试数、秘密检查、未重建容器、MySQL57 未触碰和回滚方式。
 
