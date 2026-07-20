@@ -1,0 +1,13 @@
+[project]
+name = "shuqi-database-security-agent"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1", "PyYAML==6.0.3", "PyMySQL==1.2.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["integration: requires the Docker MySQL sandbox"]

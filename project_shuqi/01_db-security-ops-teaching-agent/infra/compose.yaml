@@ -1,0 +1,73 @@
+name: shuqi-db-agent
+
+services:
+  workspace:
+    container_name: shuqi-workspace
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    working_dir: /workspace
+    command: sleep infinity
+    environment:
+      MYSQL_HOST: mysql-sandbox
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: shuqi_sandbox
+      MYSQL_APP_USER: sandbox_app
+      MYSQL_READER_USER: sandbox_reader
+      SANDBOX_MYSQL_APP_PASSWORD: ${SANDBOX_MYSQL_APP_PASSWORD}
+      SANDBOX_MYSQL_READER_PASSWORD: ${SANDBOX_MYSQL_READER_PASSWORD}
+    volumes:
+      - ..:/workspace:cached
+    depends_on:
+      mysql-sandbox:
+        condition: service_healthy
+    networks:
+      - dev-net
+      - sandbox-net
+    restart: unless-stopped
+
+  mysql-sandbox:
+    container_name: shuqi-mysql-sandbox
+    image: mysql:8.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --local-infile=0
+      - --skip-name-resolve=ON
+      - --max-connections=50
+      - --max-execution-time=5000
+      - --log-error-verbosity=2
+    env_file:
+      - ../.env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SANDBOX_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: shuqi_sandbox
+    ports:
+      - 127.0.0.1:${SANDBOX_MYSQL_PORT:-3307}:3306
+    volumes:
+      - mysql-sandbox-data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    networks:
+      - dev-net
+      - sandbox-net
+    restart: unless-stopped
+
+networks:
+  dev-net:
+    name: shuqi-dev-net
+  sandbox-net:
+    name: shuqi-sandbox-net
+    internal: true
+
+volumes:
+  mysql-sandbox-data:
+    name: shuqi-db-agent-mysql-data
