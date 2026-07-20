@@ -389,7 +389,7 @@ git push origin main
 - Consumes: Task 1 配置和 Task 2 使用说明。
 - Produces: 不删除 MySQL 卷的运行证据、容器内 Git 与 23 项测试通过证据。
 
-- [ ] **Step 1: 捕获不可变基线**
+- [x] **Step 1: 捕获不可变基线**
 
 在 01 智能体目录的 Windows PowerShell 运行：
 
@@ -407,7 +407,7 @@ if ($mysql57Before.Status -ne 'Running') { throw 'MySQL57 baseline changed' }
 
 Expected: 三个条件全部通过。失败时停止，不运行 Rebuild。
 
-- [ ] **Step 2: 预检 Compose 与定向重建计划**
+- [x] **Step 2: 预检 Compose 与定向重建计划**
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\sandbox.ps1 -Action Preflight
@@ -417,7 +417,7 @@ docker compose --dry-run --project-name shuqi-db-agent --env-file .env -f infra/
 
 Expected: Preflight/config 通过；dry-run 只出现 `shuqi-workspace` Recreate，不出现 MySQL Recreate、volume remove 或 `down --volumes`。
 
-- [ ] **Step 3: 定向重建 workspace**
+- [x] **Step 3: 定向重建 workspace**
 
 ```powershell
 docker compose --project-name shuqi-db-agent --env-file .env -f infra/compose.yaml up -d --build --no-deps --force-recreate workspace
@@ -425,7 +425,7 @@ docker compose --project-name shuqi-db-agent --env-file .env -f infra/compose.ya
 
 Expected: 只构建并重建 `shuqi-workspace`。禁止改用 `sandbox.ps1 -Action Rebuild`。
 
-- [ ] **Step 4: 验证挂载、工作目录与 Git**
+- [x] **Step 4: 验证挂载、工作目录与 Git**
 
 ```powershell
 $inspect = docker inspect shuqi-workspace | ConvertFrom-Json
@@ -457,7 +457,7 @@ git config --show-origin --get-all safe.directory
 
 不得对宿主执行该清理命令。清理后必须重新运行上面的 `$safeDirectoryOutput` 精确断言，不能只目视输出。
 
-- [ ] **Step 5: 验证测试、MySQL 卷、服务与端口**
+- [x] **Step 5: 验证测试、MySQL 卷、服务与端口**
 
 ```powershell
 docker exec -u vscode shuqi-workspace pytest -q
@@ -475,7 +475,7 @@ Get-NetTCPConnection -State Listen -LocalPort 3306,3307 |
 
 Expected: 23 passed；MySQL container ID 与之前相同；卷存在；MySQL healthy；MySQL57 Running；3307 只监听 loopback，3306 保持原服务。
 
-- [ ] **Step 6: 秘密、Git 与回滚验收**
+- [x] **Step 6: 秘密、Git 与回滚验收**
 
 ```powershell
 git status --short
@@ -525,7 +525,7 @@ docker volume inspect shuqi-db-agent-mysql-data
 
 回滚后运行完整 pytest、MySQL ID/健康/卷检查并普通 push；禁止 `reset --hard`、force push、Rebuild、全局 prune 或 volume prune。
 
-- [ ] **Step 7: 记录运行证据并提交 Task 3**
+- [x] **Step 7: 记录运行证据并提交 Task 3**
 
 日志必须记录 MySQL 前后 ID、卷存在性、dry-run、构建结果、挂载规范化路径、有效 Git 配置来源、pytest 数量、端口、秘密扫描和回滚命令。
 
