@@ -7,6 +7,7 @@ COPY --from=node_runtime /usr/local/ /usr/local/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends default-mysql-client git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory /workspace \
     && useradd --create-home --shell /bin/bash vscode \
     && pip install --no-cache-dir pytest==9.1.1 PyYAML==6.0.3 PyMySQL==1.2.0
 

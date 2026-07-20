@@ -6,7 +6,7 @@ services:
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
-    working_dir: /workspace
+    working_dir: /workspace/01_db-security-ops-teaching-agent
     command: sleep infinity
     environment:
       MYSQL_HOST: mysql-sandbox
@@ -17,7 +17,7 @@ services:
       SANDBOX_MYSQL_APP_PASSWORD: ${SANDBOX_MYSQL_APP_PASSWORD}
       SANDBOX_MYSQL_READER_PASSWORD: ${SANDBOX_MYSQL_READER_PASSWORD}
     volumes:
-      - ..:/workspace:cached
+      - ../..:/workspace:cached
     depends_on:
       mysql-sandbox:
         condition: service_healthy

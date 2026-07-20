@@ -2,12 +2,15 @@
   "name": "数据库安全运维教学智能体",
   "dockerComposeFile": "../infra/compose.yaml",
   "service": "workspace",
-  "workspaceFolder": "/workspace",
+  "workspaceFolder": "/workspace/01_db-security-ops-teaching-agent",
   "shutdownAction": "stopCompose",
   "runServices": ["mysql-sandbox", "workspace"],
   "remoteUser": "vscode",
   "customizations": {
     "vscode": {
+      "settings": {
+        "git.openRepositoryInParentFolders": "always"
+      },
       "extensions": [
         "ms-azuretools.vscode-docker",
         "ms-python.python",
