@@ -1,0 +1,21 @@
+* text=auto
+
+# Container and cross-platform source files must keep LF.
+Dockerfile text eol=lf
+*.sh text eol=lf
+*.sql text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.gitignore text eol=lf
+.gitattributes text eol=lf
+*.example text eol=lf
+
+# Host PowerShell uses native Windows line endings.
+*.ps1 text eol=crlf
+
+# Office documents are binary artifacts.
+*.docx binary

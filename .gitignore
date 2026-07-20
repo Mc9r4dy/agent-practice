@@ -1,0 +1,33 @@
+# Local secrets (all agent subprojects)
+.env
+**/.env
+!**/.env.example
+
+# Python and test artifacts
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+*.py[cod]
+.coverage
+htmlcov/
+
+# Node and build artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# Logs, temporary output, and local worktrees
+*.log
+*.tmp.*
+~$*
+artifacts/
+**/artifacts/
+.worktrees/
+
+# OS metadata
+.DS_Store
+Thumbs.db

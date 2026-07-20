@@ -35,3 +35,13 @@ def test_quick_reset_does_not_put_password_on_command_line() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
     assert '-p"$MYSQL_ROOT_PASSWORD"' not in text
     assert 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD"' in text
+
+
+def test_script_locks_the_renamed_ascii_project_root() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert (
+        "$ExpectedProjectRoot = "
+        "'F:\\project_shuqi\\01_db-security-ops-teaching-agent'"
+        in text
+    )
+    assert "FromBase64String" not in text

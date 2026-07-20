@@ -6,11 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$ExpectedProjectRoot = [Text.Encoding]::UTF8.GetString(
-  [Convert]::FromBase64String(
-    'RjpccHJvamVjdF9zaHVxaVwwMV/mlbDmja7lupPlronlhajov5Dnu7TmlZnlrabmmbrog73kvZM='
-  )
-)
+$ExpectedProjectRoot = 'F:\project_shuqi\01_db-security-ops-teaching-agent'
 $ComposeFile = Join-Path $ProjectRoot 'infra\compose.yaml'
 $EnvFile = Join-Path $ProjectRoot '.env'
 $ProjectName = 'shuqi-db-agent'

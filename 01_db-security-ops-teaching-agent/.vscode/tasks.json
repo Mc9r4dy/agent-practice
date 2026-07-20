@@ -1,0 +1,61 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Sandbox: Preflight",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Preflight"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: Start",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Start"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: Status",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Status"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: Logs",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Logs"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: Test",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Test"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: QuickReset",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "QuickReset"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: Rebuild",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Rebuild"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox: Stop",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\sandbox.ps1", "-Action", "Stop"],
+      "problemMatcher": []
+    }
+  ]
+}
