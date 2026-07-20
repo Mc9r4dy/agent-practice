@@ -75,3 +75,35 @@ def test_vscode_tasks_route_through_one_script() -> None:
             "-Action",
             action,
         ]
+
+
+def test_docs_describe_final_devcontainer_and_task_boundaries() -> None:
+    usage = (ROOT / "07_开发环境使用说明.md").read_text(encoding="utf-8")
+    for required in (
+        r"F:\project_shuqi",
+        "/workspace/01_db-security-ops-teaching-agent",
+        "git config --show-origin --get-all safe.directory",
+        "git.openRepositoryInParentFolders",
+        "git ls-remote origin refs/heads/main",
+        "凭据桥接",
+        "四个智能体",
+        "Preflight/Start/Status/Logs/Test/QuickReset/Rebuild/Stop",
+        "QuickReset",
+        "九张教学表",
+        "down --volumes",
+        "Windows 主机任务",
+        "Linux Dev Container",
+    ):
+        assert required in usage
+
+    environment_design = (ROOT / "05_开发环境与教学沙箱设计.md").read_text(
+        encoding="utf-8"
+    )
+    assert "挂载总仓库" in environment_design
+    assert "/workspace/01_db-security-ops-teaching-agent" in environment_design
+
+    old_plan = (ROOT / "06_开发环境与教学沙箱实施计划.md").read_text(
+        encoding="utf-8"
+    )
+    assert "根仓库集成补充实施状态" in old_plan
+    assert "2026-07-20-devcontainer-root-git-integration-implementation.md" in old_plan
