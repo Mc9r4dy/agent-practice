@@ -75,10 +75,17 @@
 
 | 运行位置 | 允许和推荐的任务 | 不应执行的任务 |
 | --- | --- | --- |
-| Windows 主机 VS Code/PowerShell | `Sandbox: Preflight/Start/Status/Test/Stop`，Docker 与 MySQL57 宿主检查 | 不直接修改教学数据卷内部文件 |
+| Windows 主机 VS Code/PowerShell | `Sandbox: Preflight/Start/Status/Logs/Test/QuickReset/Rebuild/Stop`，Docker 与 MySQL57 宿主检查 | 不直接修改教学数据卷内部文件；本次实施和回滚禁止运行 `Rebuild` |
 | Linux Dev Container | Python/Node 开发、`pytest`、Git status/diff/branch、经用户操作的 Git 远端命令 | 不运行依赖 `powershell.exe` 的宿主 Tasks，不管理 Docker Desktop，不连接 Windows MySQL57 |
 
-`.vscode/tasks.json` 中现有沙箱任务是 Windows 主机任务。使用说明必须明确：进入容器后通过终端运行 `pytest` 和 Git 命令，不从容器运行这些 Tasks。本次不挂载 Docker Socket，也不为容器安装宿主控制能力。
+`.vscode/tasks.json` 中八个现有沙箱任务全部是 Windows 主机任务，其数据影响分级如下：
+
+- `Preflight`、`Status`、`Logs` 和 `Test`：诊断或测试任务，不重置教学数据；
+- `Start` 和 `Stop`：项目生命周期任务；`Stop` 保留教学数据卷；
+- `QuickReset`：破坏性教学状态重置，会执行 `002_seed.sql`，先删除九张教学表中的现有场景数据，再写回标准合成数据；只能在明确需要重置教学场景时由用户主动运行；
+- `Rebuild`：完全重建任务，会执行 `down --volumes` 并删除教学 MySQL 数据卷；本次 Dev Container 实施和回滚明确禁止使用。
+
+使用说明必须明确：进入容器后通过终端运行 `pytest` 和 Git 命令，不从容器运行上述 Tasks。本次不挂载 Docker Socket，也不为容器安装宿主控制能力。
 
 ## 6. Git 所有权、凭据与跨智能体安全边界
 
@@ -87,6 +94,10 @@
 - Docker Desktop bind mount 在本机验证为 `root:root`，容器开发用户为 `vscode`；
 - `.devcontainer/Dockerfile` 使用系统级受保护配置加入精确路径 `/workspace`；
 - 禁止使用 `safe.directory=*`，也不信任 `/workspace/*` 或其他任意仓库；
+- Dev Containers 复制的宿主 `.gitconfig` 可能在全局作用域重新引入宽泛 `safe.directory`，因此只检查系统级配置不足以证明最终信任边界；
+- 契约测试约束项目提供的系统级配置，运行和人工验收使用 `git config --show-origin --get-all safe.directory` 检查所有有效受保护配置来源；
+- 最终有效条目只允许精确的 `/workspace`；出现 `*`、`/workspace/*`、其他路径或无法识别的来源时均视为失败；
+- 若宿主配置副本引入冲突，默认采用 fail-closed：停止验收，不自动修改宿主 Git 配置；只允许删除容器内复制的全局 `safe.directory` 冲突键，保留用户身份、credential helper 等其他 Git 配置，再重新执行全作用域检查；
 - 契约测试和运行测试都必须验证精确路径，缺失或放宽均视为失败。
 
 ### Git 配置与凭据
@@ -110,6 +121,7 @@
 - Compose 解析失败：停止重建，保留现有容器和数据卷，先修复配置；
 - workspace 重建失败：不执行全局 prune，不删除 MySQL 数据卷，可恢复旧配置后定向重建 workspace；
 - 容器内 Git 根目录不是 `/workspace` 或出现 dubious ownership：视为验收失败；
+- Git 全作用域有效 `safe.directory` 出现通配符、额外路径或来源不明条目：停止验收，只处理容器内复制配置，不自动修改宿主配置；
 - VS Code SCM 未自动识别父仓库：检查容器设置是否生效，不用人工提示掩盖配置缺失；
 - 自动化测试失败：保留 RED/GREEN 输出并停止提交运行配置；
 - MySQL 健康检查失败：只排查本项目 `shuqi-*` 资源，不连接、停止或修改 Windows `MySQL57`，不读写 `E:\MySql`；
@@ -152,6 +164,7 @@
 - 以 `vscode` 用户运行 Git，不附加临时 `-c safe.directory=...`，`git rev-parse --show-toplevel` 返回 `/workspace`；
 - `git status -sb` 显示 `main` 与 `origin/main`，不出现 dubious ownership；
 - `git config --system --get-all safe.directory` 只包含目标精确路径，不包含 `*`；
+- `git config --show-origin --get-all safe.directory` 检查所有有效作用域，最终条目只允许精确 `/workspace`，不存在 `*`、`/workspace/*`、其他路径或来源不明条目；
 - 全量 pytest 通过；
 - `shuqi-mysql-sandbox` 仍为 healthy，教学数据卷仍存在；
 - 教学端口仍为 `127.0.0.1:3307->3306`；
@@ -165,9 +178,10 @@
 2. 终端默认目录为 `/workspace/01_db-security-ops-teaching-agent`；
 3. 源代码管理面板无需接受父仓库提示即可识别 `/workspace`；
 4. `git.openRepositoryInParentFolders` 的远端设置为 `always`；
-5. Git 配置/凭据桥接来源符合本设计，不存在写入镜像或项目文件的令牌；
-6. 容器内只读 `git ls-remote` 可用；若用户不授权远端凭据使用，则记录该项未启用，不把它误判为仓库识别失败；
-7. Windows-only 沙箱 Tasks 不在容器内执行。
+5. `git config --show-origin --get-all safe.directory` 的有效结果仅为精确 `/workspace`；若宿主副本带入冲突项，按本设计在容器副本内处理并复验；
+6. Git 配置/凭据桥接来源符合本设计，不存在写入镜像或项目文件的令牌；
+7. 容器内只读 `git ls-remote` 可用；若用户不授权远端凭据使用，则记录该项未启用，不把它误判为仓库识别失败；
+8. 八个 Windows-only 沙箱 Tasks 均不在容器内执行，且用户知晓 `QuickReset` 与 `Rebuild` 的数据影响。
 
 自动化检查不冒充 GUI 人工步骤。只有实际 Reopen 后才能确认 Dev Containers 自身的设置和凭据桥接行为。
 
@@ -225,10 +239,10 @@ docker compose --project-name shuqi-db-agent --env-file .env -f infra/compose.ya
 
 1. YAML/JSON/Dockerfile 契约测试和全量 pytest 通过；
 2. workspace 定向重建成功，MySQL 容器与数据卷未被删除；
-3. `vscode` 用户无需临时参数即可使用 `/workspace` Git 仓库；
+3. `vscode` 用户无需临时参数即可使用 `/workspace` Git 仓库，所有有效 Git 配置作用域中的 `safe.directory` 仅允许精确 `/workspace`；
 4. VS Code SCM 自动识别父仓库；
 5. Git 凭据桥接边界已经人工确认并记录；
-6. Windows 主机任务与 Linux 容器任务边界写入使用说明；
+6. 八个 Windows 主机任务与 Linux 容器任务边界、`QuickReset`/`Rebuild` 数据影响写入使用说明；
 7. MySQL57、3306/3307 端口隔离和沙箱健康状态通过；
 8. 开发日志完整，最终本地与远端 SHA 一致，工作树干净；
 9. 用户完成 VS Code GUI 连接确认。
