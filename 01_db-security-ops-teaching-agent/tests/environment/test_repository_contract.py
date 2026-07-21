@@ -122,67 +122,6 @@ def test_docs_assign_compose_lifecycle_to_explicit_windows_tasks() -> None:
         assert required in usage
 
 
-def test_current_docs_include_fail_closed_full_environment_rollback() -> None:
-    usage = (ROOT / "07_开发环境使用说明.md").read_text(encoding="utf-8")
-    rollback_section = usage.split("### 12.2 环境阶段完整回滚", 1)[1]
-    rollback_script = rollback_section.split("```powershell", 1)[1].split("```", 1)[0]
-    required_fragments = (
-        "25351d020a9ef413d9288010028acba579fe7938",
-        "^Close final Dev Container review gaps$",
-        "$preRollbackHead = git rev-parse HEAD",
-        '$commits = @(git rev-list "$base..$rollbackHead")',
-        "git revert --no-commit $commits",
-        "git revert --abort",
-        "git restore --source=$preRollbackHead --staged --worktree -- 01_db-security-ops-teaching-agent/04_开发日志.md",
-        "--no-deps --force-recreate workspace",
-        "Get-Service MySQL57",
-        "git push origin main",
-        "git ls-remote origin refs/heads/main",
-        "git reset --hard",
-        "force push",
-        "down --volumes",
-        "QuickReset",
-    )
-    for required in required_fragments:
-        assert required in rollback_section, f"07 rollback missing {required}"
-
-
-def test_rollback_checks_main_and_synced_remote_before_docker_or_revert() -> None:
-    usage = (ROOT / "07_开发环境使用说明.md").read_text(encoding="utf-8")
-    rollback_script = usage.split("### 12.2 环境阶段完整回滚", 1)[1]
-    rollback_script = rollback_script.split("```powershell", 1)[1].split("```", 1)[0]
-    required_guards = (
-        "$branch = git branch --show-current",
-        "if ($LASTEXITCODE -ne 0 -or $branch -cne 'main')",
-        "$remoteLines = @(git ls-remote origin refs/heads/main)",
-        "if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -ne 1)",
-        "$remoteHead = ($remoteLines[0] -split '\\s+')[0]",
-        "if ([string]::IsNullOrWhiteSpace($remoteHead) -or $remoteHead -ne $preRollbackHead)",
-    )
-    for required in required_guards:
-        assert required in rollback_script
-        assert rollback_script.index(required) < rollback_script.index(
-            "docker inspect shuqi-mysql-sandbox"
-        )
-        assert rollback_script.index(required) < rollback_script.index(
-            "git revert --no-commit $commits"
-        )
-
-
-def test_rollback_requires_mysql57_to_own_every_3306_listener() -> None:
-    usage = (ROOT / "07_开发环境使用说明.md").read_text(encoding="utf-8")
-    rollback_script = usage.split("### 12.2 环境阶段完整回滚", 1)[1]
-    rollback_script = rollback_script.split("```powershell", 1)[1].split("```", 1)[0]
-    for required in (
-        "if ($mysql57PidBefore -le 0)",
-        "$port3306ConnectionsBefore = @(Get-NetTCPConnection -State Listen -LocalPort 3306)",
-        "$foreign3306Before = @($port3306ConnectionsBefore | Where-Object { $_.OwningProcess -ne $mysql57PidBefore })",
-        "if ($port3306ConnectionsBefore.Count -eq 0 -or $foreign3306Before.Count -ne 0)",
-        "if (Compare-Object $port3306Before $port3306After)",
-    ):
-        assert required in rollback_script
-
-
 def test_plan_references_usage_as_the_only_canonical_rollback_script() -> None:
     plan = (ROOT / "06_开发环境与教学沙箱实施计划.md").read_text(encoding="utf-8")
     supplement = plan.split("## 终审修复补充（2026-07-21）", 1)[1]

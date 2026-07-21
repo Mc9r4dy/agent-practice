@@ -1,7 +1,8 @@
 import json
 from copy import deepcopy
-import re
 from pathlib import Path
+import shlex
+import subprocess
 
 import pytest
 import yaml
@@ -24,34 +25,210 @@ def load_devcontainer() -> dict:
 
 def assert_workspace_security_contract(workspace: dict) -> None:
     """Reject workspace access that can control the host or elevate the container."""
-    assert "privileged" not in workspace
-    assert "cap_add" not in workspace
-    assert "devices" not in workspace
+    assert set(workspace) == {
+        "container_name",
+        "build",
+        "working_dir",
+        "command",
+        "environment",
+        "volumes",
+        "depends_on",
+        "networks",
+        "restart",
+    }
+    assert workspace["container_name"] == "shuqi-workspace"
+    assert workspace["build"] == {
+        "context": "..",
+        "dockerfile": ".devcontainer/Dockerfile",
+    }
+    assert workspace["working_dir"] == AGENT_CONTAINER_PATH
+    assert workspace["command"] == "sleep infinity"
+    assert workspace["environment"] == {
+        "MYSQL_HOST": "mysql-sandbox",
+        "MYSQL_PORT": "3306",
+        "MYSQL_DATABASE": "shuqi_sandbox",
+        "MYSQL_APP_USER": "sandbox_app",
+        "MYSQL_READER_USER": "sandbox_reader",
+        "SANDBOX_MYSQL_APP_PASSWORD": "${SANDBOX_MYSQL_APP_PASSWORD}",
+        "SANDBOX_MYSQL_READER_PASSWORD": "${SANDBOX_MYSQL_READER_PASSWORD}",
+    }
     assert workspace["volumes"] == ["../..:/workspace:cached"]
+    assert workspace["depends_on"] == {
+        "mysql-sandbox": {"condition": "service_healthy"}
+    }
+    assert workspace["networks"] == ["dev-net", "sandbox-net"]
+    assert workspace["restart"] == "unless-stopped"
+
+
+def assert_mysql_security_contract(mysql: dict) -> None:
+    """Reject MySQL service options that can escape the sandbox boundary."""
+    assert set(mysql) == {
+        "container_name",
+        "image",
+        "command",
+        "env_file",
+        "environment",
+        "ports",
+        "volumes",
+        "healthcheck",
+        "networks",
+        "restart",
+    }
+    assert mysql["container_name"] == "shuqi-mysql-sandbox"
+    assert mysql["image"] == "mysql:8.4"
+    assert mysql["env_file"] == ["../.env"]
+    assert mysql["environment"] == {
+        "MYSQL_ROOT_PASSWORD": "${SANDBOX_MYSQL_ROOT_PASSWORD}",
+        "MYSQL_DATABASE": "shuqi_sandbox",
+    }
+    assert mysql["ports"] == ["127.0.0.1:${SANDBOX_MYSQL_PORT:-3307}:3306"]
+    assert mysql["volumes"] == [
+        "mysql-sandbox-data:/var/lib/mysql",
+        "./mysql/init:/docker-entrypoint-initdb.d:ro",
+    ]
+    assert mysql["healthcheck"] == {
+        "test": [
+            "CMD-SHELL",
+            "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ],
+        "interval": "5s",
+        "timeout": "5s",
+        "retries": 24,
+        "start_period": "20s",
+    }
+    assert mysql["networks"] == ["dev-net", "sandbox-net"]
+    assert mysql["restart"] == "unless-stopped"
+
+
+def assert_devcontainer_security_contract(devcontainer: dict) -> None:
+    """Reject Dev Container options that bypass the Compose service contract."""
+    assert set(devcontainer) == {
+        "name",
+        "dockerComposeFile",
+        "service",
+        "workspaceFolder",
+        "shutdownAction",
+        "runServices",
+        "remoteUser",
+        "customizations",
+        "postCreateCommand",
+    }
+    assert devcontainer == {
+        "name": "数据库安全运维教学智能体",
+        "dockerComposeFile": "../infra/compose.yaml",
+        "service": "workspace",
+        "workspaceFolder": AGENT_CONTAINER_PATH,
+        "shutdownAction": "none",
+        "runServices": ["mysql-sandbox", "workspace"],
+        "remoteUser": "vscode",
+        "customizations": {
+            "vscode": {
+                "settings": {"git.openRepositoryInParentFolders": "always"},
+                "extensions": [
+                    "ms-azuretools.vscode-docker",
+                    "ms-python.python",
+                    "ms-python.vscode-pylance",
+                    "Vue.volar",
+                ],
+            }
+        },
+        "postCreateCommand": "python --version && node --version && pytest --version",
+    }
 
 
 def assert_safe_directory_contract(dockerfile: str) -> None:
-    """Allow exactly one system-level trust entry for the mounted repository."""
-    assert len(re.findall(r"safe\.directory", dockerfile, flags=re.IGNORECASE)) == 1
-    assert "/etc/gitconfig" not in dockerfile
-    assert "GIT_CONFIG_SYSTEM" not in dockerfile
-    assert "--replace-all" not in dockerfile
-    canonical_line = "&& git config --system --add safe.directory /workspace \\"
-    assert [
-        line for line in dockerfile.splitlines() if line.strip() == canonical_line
-    ] == ["    " + canonical_line]
+    """Allow only the reviewed instructions and shell-token-normalized trust command."""
+    logical_lines: list[str] = []
+    current = ""
+    for raw_line in dockerfile.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current = f"{current} {stripped}".strip()
+        if current.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+        logical_lines.append(current)
+        current = ""
+    assert not current
+
+    instructions = [line.split(maxsplit=1) for line in logical_lines]
+    assert [parts[0].upper() for parts in instructions] == [
+        "FROM",
+        "FROM",
+        "COPY",
+        "RUN",
+        "WORKDIR",
+        "USER",
+        "CMD",
+    ]
+    assert instructions[0][1] == "node:24-bookworm-slim AS node_runtime"
+    assert instructions[1][1] == "python:3.13-slim-bookworm"
+    assert instructions[2][1] == "--from=node_runtime /usr/local/ /usr/local/"
+    assert shlex.split(instructions[3][1], posix=True) == [
+        "apt-get",
+        "update",
+        "&&",
+        "apt-get",
+        "install",
+        "-y",
+        "--no-install-recommends",
+        "default-mysql-client",
+        "git",
+        "curl",
+        "ca-certificates",
+        "&&",
+        "rm",
+        "-rf",
+        "/var/lib/apt/lists/*",
+        "&&",
+        "git",
+        "config",
+        "--system",
+        "--add",
+        "safe.directory",
+        "/workspace",
+        "&&",
+        "useradd",
+        "--create-home",
+        "--shell",
+        "/bin/bash",
+        "vscode",
+        "&&",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "pytest==9.1.1",
+        "PyYAML==6.0.3",
+        "PyMySQL==1.2.0",
+    ]
+    assert instructions[4][1] == "/workspace"
+    assert instructions[5][1] == "vscode"
+    assert json.loads(instructions[6][1]) == ["sleep", "infinity"]
 
 
 def test_services_image_and_local_port() -> None:
-    services = load_compose()["services"]
+    compose = load_compose()
+    assert set(compose) == {"name", "services", "networks", "volumes"}
+    assert compose["name"] == "shuqi-db-agent"
+    assert compose["networks"] == {
+        "dev-net": {"name": "shuqi-dev-net"},
+        "sandbox-net": {"name": "shuqi-sandbox-net", "internal": True},
+    }
+    assert compose["volumes"] == {
+        "mysql-sandbox-data": {"name": "shuqi-db-agent-mysql-data"}
+    }
+    services = compose["services"]
     assert set(services) == {"workspace", "mysql-sandbox"}
     mysql = services["mysql-sandbox"]
+    assert_mysql_security_contract(mysql)
     assert mysql["image"] == "mysql:8.4"
     assert mysql["ports"] == [
         "127.0.0.1:${SANDBOX_MYSQL_PORT:-3307}:3306"
     ]
     assert mysql.get("privileged") is not True
     workspace = services["workspace"]
+    assert_workspace_security_contract(workspace)
     assert "env_file" not in workspace
     assert "SANDBOX_MYSQL_ROOT_PASSWORD" not in workspace["environment"]
 
@@ -94,7 +271,9 @@ def test_internal_network_and_devcontainer_target() -> None:
 
 
 def test_devcontainer_does_not_stop_compose_on_editor_shutdown() -> None:
-    assert load_devcontainer()["shutdownAction"] == "none"
+    devcontainer = load_devcontainer()
+    assert_devcontainer_security_contract(devcontainer)
+    assert devcontainer["shutdownAction"] == "none"
 
 
 def test_workspace_has_no_container_host_escalation_paths() -> None:
@@ -118,6 +297,70 @@ def test_workspace_security_contract_rejects_dangerous_variants(
     workspace[field] = value
     with pytest.raises(AssertionError):
         assert_workspace_security_contract(workspace)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("extends", {"file": "host.yaml", "service": "workspace"}),
+        ("volumes_from", ["host-controller"]),
+        ("pid", "host"),
+        ("ipc", "host"),
+        ("network_mode", "host"),
+    ],
+)
+def test_workspace_security_contract_rejects_inherited_and_host_namespace_variants(
+    field: str,
+    value: object,
+) -> None:
+    workspace = deepcopy(load_compose()["services"]["workspace"])
+    workspace[field] = value
+    with pytest.raises(AssertionError):
+        assert_workspace_security_contract(workspace)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("extends", {"file": "host.yaml", "service": "mysql"}),
+        ("volumes_from", ["host-controller"]),
+        ("privileged", True),
+        ("devices", ["/dev/sda:/dev/sda"]),
+        ("cap_add", ["SYS_ADMIN"]),
+        ("pid", "host"),
+        ("network_mode", "host"),
+        ("volumes", ["/var/lib/mysql:/var/lib/mysql"]),
+        ("ports", ["0.0.0.0:3307:3306"]),
+    ],
+)
+def test_mysql_security_contract_rejects_unexpected_service_variants(
+    field: str,
+    value: object,
+) -> None:
+    mysql = deepcopy(load_compose()["services"]["mysql-sandbox"])
+    mysql[field] = value
+    with pytest.raises(AssertionError):
+        assert_mysql_security_contract(mysql)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mounts", ["source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"]),
+        ("runArgs", ["--privileged"]),
+        ("containerEnv", {"DOCKER_HOST": "unix:///var/run/docker.sock"}),
+        ("hostRequirements", {"gpu": "optional"}),
+        ("workspaceMount", "source=/,target=/host,type=bind"),
+    ],
+)
+def test_devcontainer_security_contract_rejects_bypass_variants(
+    field: str,
+    value: object,
+) -> None:
+    devcontainer = deepcopy(load_devcontainer())
+    devcontainer[field] = value
+    with pytest.raises(AssertionError):
+        assert_devcontainer_security_contract(devcontainer)
 
 
 def test_workspace_mounts_repository_root_and_opens_agent_folder() -> None:
@@ -146,16 +389,37 @@ def test_devcontainer_limits_git_trust_and_discovers_parent_repo() -> None:
     assert_safe_directory_contract(DOCKERFILE.read_text(encoding="utf-8"))
 
 
+def test_running_container_effective_system_git_trust_is_exact() -> None:
+    if not Path("/.dockerenv").exists():
+        pytest.skip("effective system Git config is verified inside shuqi-workspace")
+    result = subprocess.run(
+        [
+            "git",
+            "config",
+            "--system",
+            "--show-origin",
+            "--get-all",
+            "safe.directory",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["file:/etc/gitconfig\t/workspace"]
+
+
 @pytest.mark.parametrize(
     "injection",
     [
-        " && git config --system --add safe.directory /tmp",
-        "\nRUN git config --system --add safe.directory /tmp",
-        " && git config --system --add SAFE.Directory /tmp",
-        " && git config --system --replace-all safe.directory /tmp",
-        " && git config --system safe.directory /tmp",
-        " && printf '[safe]\\n directory = /tmp\\n' >> /etc/gitconfig",
-        " && GIT_CONFIG_SYSTEM=/tmp/gitconfig git config --add safe.directory /tmp",
+        "\nRUN git config --system --add safe.directory /tmp\n",
+        "\nRUN git config --system --add SAFE.Directory /tmp\n",
+        "\nRUN git config --system --replace-all safe.directory /tmp\n",
+        "\nRUN git config --system safe.directory /tmp\n",
+        "\nRUN printf '[safe]\\n directory = /tmp\\n' >> /etc/gitconfig\n",
+        "\nRUN GIT_CONFIG_SYSTEM=/tmp/gitconfig git config --add safe.directory /tmp\n",
+        "\nRUN git config --system --add safe.\"directory\" '*'\n",
+        "\nRUN git config --system --add 'safe.'directory /tmp\n",
     ],
 )
 def test_safe_directory_contract_rejects_bypass_variants(injection: str) -> None:
