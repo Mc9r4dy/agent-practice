@@ -3,7 +3,7 @@
   "dockerComposeFile": "../infra/compose.yaml",
   "service": "workspace",
   "workspaceFolder": "/workspace/01_db-security-ops-teaching-agent",
-  "shutdownAction": "stopCompose",
+  "shutdownAction": "none",
   "runServices": ["mysql-sandbox", "workspace"],
   "remoteUser": "vscode",
   "customizations": {

@@ -1,7 +1,9 @@
 import json
+from copy import deepcopy
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -18,6 +20,28 @@ def load_compose() -> dict:
 
 def load_devcontainer() -> dict:
     return json.loads(DEVCONTAINER.read_text(encoding="utf-8"))
+
+
+def assert_workspace_security_contract(workspace: dict) -> None:
+    """Reject workspace access that can control the host or elevate the container."""
+    assert "privileged" not in workspace
+    assert "cap_add" not in workspace
+    assert "devices" not in workspace
+    assert workspace["volumes"] == ["../..:/workspace:cached"]
+
+
+def assert_safe_directory_contract(dockerfile: str) -> None:
+    """Allow exactly one system-level trust entry for the mounted repository."""
+    assert dockerfile.count("safe.directory") == 1
+    assert "/etc/gitconfig" not in dockerfile
+    assert "GIT_CONFIG_SYSTEM" not in dockerfile
+    assert "--replace-all" not in dockerfile
+    canonical_commands = re.findall(
+        r"(?<!\S)git\s+config\s+--system\s+--add\s+"
+        r"safe\.directory\s+/workspace(?=\s*(?:\\|&&|$))",
+        dockerfile,
+    )
+    assert len(canonical_commands) == 1
 
 
 def test_services_image_and_local_port() -> None:
@@ -71,6 +95,33 @@ def test_internal_network_and_devcontainer_target() -> None:
     assert devcontainer["service"] == "workspace"
 
 
+def test_devcontainer_does_not_stop_compose_on_editor_shutdown() -> None:
+    assert load_devcontainer()["shutdownAction"] == "none"
+
+
+def test_workspace_has_no_container_host_escalation_paths() -> None:
+    assert_workspace_security_contract(load_compose()["services"]["workspace"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("privileged", True),
+        ("cap_add", ["SYS_ADMIN"]),
+        ("devices", ["/dev/sda:/dev/sda"]),
+        ("volumes", ["../..:/workspace:cached", "/var/run/docker.sock:/var/run/docker.sock"]),
+    ],
+)
+def test_workspace_security_contract_rejects_dangerous_variants(
+    field: str,
+    value: object,
+) -> None:
+    workspace = deepcopy(load_compose()["services"]["workspace"])
+    workspace[field] = value
+    with pytest.raises(AssertionError):
+        assert_workspace_security_contract(workspace)
+
+
 def test_workspace_mounts_repository_root_and_opens_agent_folder() -> None:
     workspace = load_compose()["services"]["workspace"]
     assert workspace["working_dir"] == AGENT_CONTAINER_PATH
@@ -94,13 +145,21 @@ def test_devcontainer_limits_git_trust_and_discovers_parent_repo() -> None:
     vscode = devcontainer["customizations"]["vscode"]
     assert vscode["settings"]["git.openRepositoryInParentFolders"] == "always"
 
-    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-    safe_directory_targets = re.findall(
-        r"git config --system --add safe\.directory\s+(\S+)",
-        dockerfile,
-    )
-    assert safe_directory_targets == ["/workspace"]
-    safe_directory_lines = [
-        line for line in dockerfile.splitlines() if "safe.directory" in line
-    ]
-    assert all("*" not in line for line in safe_directory_lines)
+    assert_safe_directory_contract(DOCKERFILE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "injection",
+    [
+        " && git config --system --add safe.directory /tmp",
+        "\nRUN git config --system --add safe.directory /tmp",
+        " && git config --system --replace-all safe.directory /tmp",
+        " && git config --system safe.directory /tmp",
+        " && printf '[safe]\\n directory = /tmp\\n' >> /etc/gitconfig",
+        " && GIT_CONFIG_SYSTEM=/tmp/gitconfig git config --add safe.directory /tmp",
+    ],
+)
+def test_safe_directory_contract_rejects_bypass_variants(injection: str) -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8") + injection
+    with pytest.raises(AssertionError):
+        assert_safe_directory_contract(dockerfile)

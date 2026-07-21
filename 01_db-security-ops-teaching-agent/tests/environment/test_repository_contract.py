@@ -107,3 +107,61 @@ def test_docs_describe_final_devcontainer_and_task_boundaries() -> None:
     )
     assert "根仓库集成补充实施状态" in old_plan
     assert "2026-07-20-devcontainer-root-git-integration-implementation.md" in old_plan
+
+
+def test_docs_assign_compose_lifecycle_to_explicit_windows_tasks() -> None:
+    usage = (ROOT / "07_开发环境使用说明.md").read_text(encoding="utf-8")
+    for required in (
+        "shutdownAction=none",
+        "关闭或切换 VS Code 不自动停止 Compose",
+        "Sandbox: Stop",
+        "Sandbox: Status/Start",
+        "Reload Window/Reopen in Container",
+        "不要 Rebuild/QuickReset",
+    ):
+        assert required in usage
+
+
+def test_current_docs_include_fail_closed_full_environment_rollback() -> None:
+    documents = (
+        ROOT / "07_开发环境使用说明.md",
+        ROOT / "06_开发环境与教学沙箱实施计划.md",
+    )
+    required_fragments = (
+        "环境阶段完整回滚",
+        "25351d020a9ef413d9288010028acba579fe7938",
+        "^Resolve final Dev Container review findings$",
+        "$preRollbackHead = git rev-parse HEAD",
+        '$commits = @(git rev-list "$base..$rollbackHead")',
+        "git revert --no-commit $commits",
+        "git revert --abort",
+        "git restore --source=$preRollbackHead --staged --worktree -- 01_db-security-ops-teaching-agent/04_开发日志.md",
+        "--no-deps --force-recreate workspace",
+        "Get-Service MySQL57",
+        "git push origin main",
+        "git ls-remote origin refs/heads/main",
+        "git reset --hard",
+        "force push",
+        "down --volumes",
+        "QuickReset",
+    )
+    for document in documents:
+        contents = document.read_text(encoding="utf-8")
+        for required in required_fragments:
+            assert required in contents, f"{document.name} missing {required}"
+
+
+def test_root_git_plan_maps_gitignore_to_process_material_exclusions() -> None:
+    plan = (
+        ROOT
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-07-20-devcontainer-root-git-integration-implementation.md"
+    ).read_text(encoding="utf-8")
+    planned_file_map = plan.split("## Planned File Map", 1)[1].split("\n## ", 1)[0]
+    gitignore_rows = [
+        line for line in planned_file_map.splitlines() if "`.gitignore`" in line
+    ]
+    assert len(gitignore_rows) == 1, "Planned File Map must include root .gitignore"
+    assert "流程材料" in gitignore_rows[0]

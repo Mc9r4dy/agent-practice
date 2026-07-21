@@ -28,6 +28,7 @@
 | --- | --- | --- |
 | `tests/environment/test_compose_contract.py` | YAML/JSON/Dockerfile 结构契约 | 修改 |
 | `tests/environment/test_repository_contract.py` | 当前文档与主机/容器边界契约 | 修改 |
+| 根 `.gitignore` | 排除 `.superpowers/` 等本地流程材料，防止实施/评审中间产物进入 Git | 修改 |
 | `infra/compose.yaml` | 根仓库挂载和默认工作目录 | 修改 |
 | `.devcontainer/Dockerfile` | 精确 system `safe.directory` | 修改 |
 | `.devcontainer/devcontainer.json` | 子目录 workspaceFolder 与父仓库发现 | 修改 |
