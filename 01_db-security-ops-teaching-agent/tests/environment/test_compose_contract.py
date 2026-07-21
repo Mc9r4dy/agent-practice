@@ -32,16 +32,14 @@ def assert_workspace_security_contract(workspace: dict) -> None:
 
 def assert_safe_directory_contract(dockerfile: str) -> None:
     """Allow exactly one system-level trust entry for the mounted repository."""
-    assert dockerfile.count("safe.directory") == 1
+    assert len(re.findall(r"safe\.directory", dockerfile, flags=re.IGNORECASE)) == 1
     assert "/etc/gitconfig" not in dockerfile
     assert "GIT_CONFIG_SYSTEM" not in dockerfile
     assert "--replace-all" not in dockerfile
-    canonical_commands = re.findall(
-        r"(?<!\S)git\s+config\s+--system\s+--add\s+"
-        r"safe\.directory\s+/workspace(?=\s*(?:\\|&&|$))",
-        dockerfile,
-    )
-    assert len(canonical_commands) == 1
+    canonical_line = "&& git config --system --add safe.directory /workspace \\"
+    assert [
+        line for line in dockerfile.splitlines() if line.strip() == canonical_line
+    ] == ["    " + canonical_line]
 
 
 def test_services_image_and_local_port() -> None:
@@ -153,6 +151,7 @@ def test_devcontainer_limits_git_trust_and_discovers_parent_repo() -> None:
     [
         " && git config --system --add safe.directory /tmp",
         "\nRUN git config --system --add safe.directory /tmp",
+        " && git config --system --add SAFE.Directory /tmp",
         " && git config --system --replace-all safe.directory /tmp",
         " && git config --system safe.directory /tmp",
         " && printf '[safe]\\n directory = /tmp\\n' >> /etc/gitconfig",
@@ -163,3 +162,14 @@ def test_safe_directory_contract_rejects_bypass_variants(injection: str) -> None
     dockerfile = DOCKERFILE.read_text(encoding="utf-8") + injection
     with pytest.raises(AssertionError):
         assert_safe_directory_contract(dockerfile)
+
+
+def test_safe_directory_contract_rejects_echoed_canonical_text() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    echoed = dockerfile.replace(
+        "&& git config --system --add safe.directory /workspace \\",
+        "&& echo git config --system --add safe.directory /workspace \\",
+    )
+    assert echoed != dockerfile
+    with pytest.raises(AssertionError):
+        assert_safe_directory_contract(echoed)
