@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $ExpectedRoot = 'F:\project_shuqi'
 $Base = '25351d020a9ef413d9288010028acba579fe7938'
-$Marker = '^Harden rollback and environment security contracts$'
+$Marker = '^Close executable rollback review gaps$'
 $LogPath = '01_db-security-ops-teaching-agent/04_开发日志.md'
 $AgentRoot = '01_db-security-ops-teaching-agent'
 $ComposeFile = "$AgentRoot/infra/compose.yaml"
@@ -19,9 +19,39 @@ $MysqlContainer = 'shuqi-mysql-sandbox'
 $MysqlVolume = 'shuqi-db-agent-mysql-data'
 $script:Scenario = $null
 $script:ContractMode = -not [string]::IsNullOrWhiteSpace($ContractTestScenario)
+$script:ContractModeName = ''
+$script:FailureRuleCounts = @{}
+
+function Assert-IsolatedContractRoot {
+    param(
+        [Parameter(Mandatory)][string]$ProductionRoot,
+        [Parameter(Mandatory)][string]$RequestedRoot
+    )
+    $production = [IO.Path]::GetFullPath($ProductionRoot).TrimEnd([char[]]@('\', '/'))
+    $requested = [IO.Path]::GetFullPath($RequestedRoot).TrimEnd([char[]]@('\', '/'))
+    if ([StringComparer]::OrdinalIgnoreCase.Equals($production, $requested)) {
+        throw 'Isolated contract mode refuses the shared production repository'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $requested '.rollback-contract-isolated') -PathType Leaf)) {
+        throw 'Isolated contract root marker is missing'
+    }
+}
 
 if ($script:ContractMode) {
     $script:Scenario = Get-Content -LiteralPath $ContractTestScenario -Raw -Encoding UTF8 | ConvertFrom-Json
+    $modeProperty = $script:Scenario.PSObject.Properties['mode']
+    $script:ContractModeName = if ($null -eq $modeProperty) { 'preflight' } else { [string]$modeProperty.Value }
+    if ($script:ContractModeName -ceq 'isolated') {
+        Assert-IsolatedContractRoot -ProductionRoot $ExpectedRoot -RequestedRoot ([string]$script:Scenario.expectedRoot)
+        $ExpectedRoot = [string]$script:Scenario.expectedRoot
+        $Base = [string]$script:Scenario.base
+        $Marker = [string]$script:Scenario.marker
+        $LogPath = [string]$script:Scenario.logPath
+    }
+}
+
+function Test-IsolatedContractMode {
+    return $script:ContractMode -and $script:ContractModeName -ceq 'isolated'
 }
 
 function New-NativeResult {
@@ -49,8 +79,98 @@ function Invoke-Native {
         [Parameter(Mandatory)][string]$File,
         [Parameter(Mandatory)][string[]]$Arguments
     )
-    $output = @(& $File @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    if (-not (Test-IsolatedContractMode)) {
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $File @Arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        return New-NativeResult -ExitCode $exitCode -Lines $output
+    }
+
+    [Console]::Out.WriteLine("CALL:$File $($Arguments -join ' ')")
+    $matchedRule = $null
+    $ruleIndex = -1
+    $rulesProperty = $script:Scenario.PSObject.Properties['failureRules']
+    if ($null -ne $rulesProperty) {
+        $rules = @($rulesProperty.Value)
+        for ($index = 0; $index -lt $rules.Count; $index++) {
+            $rule = $rules[$index]
+            if ([string]$rule.file -ine $File) { continue }
+            $expected = @($rule.arguments | ForEach-Object { [string]$_ })
+            $position = 0
+            foreach ($argument in $Arguments) {
+                if ($position -lt $expected.Count -and $argument -ieq $expected[$position]) {
+                    $position++
+                }
+            }
+            if ($position -ne $expected.Count) { continue }
+            $count = if ($script:FailureRuleCounts.ContainsKey($index)) {
+                [int]$script:FailureRuleCounts[$index] + 1
+            } else { 1 }
+            $script:FailureRuleCounts[$index] = $count
+            if ($count -eq [int]$rule.occurrence) {
+                $matchedRule = $rule
+                $ruleIndex = $index
+                break
+            }
+        }
+    }
+
+    if ($null -ne $matchedRule) {
+        $sequencerProperty = $matchedRule.PSObject.Properties['createSequencer']
+        if ($null -ne $sequencerProperty -and [bool]$sequencerProperty.Value) {
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $gitDirectoryOutput = @(& git rev-parse --git-dir 2>&1)
+                $gitDirectoryExitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousPreference
+            }
+            if ($gitDirectoryExitCode -ne 0 -or $gitDirectoryOutput.Count -ne 1) {
+                throw 'Isolated contract could not create the requested sequencer fixture'
+            }
+            $gitDirectory = [string]$gitDirectoryOutput[0]
+            if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) {
+                $gitDirectory = Join-Path -Path (Get-Location).Path -ChildPath $gitDirectory
+            }
+            New-Item -ItemType Directory -Path (Join-Path $gitDirectory 'sequencer') -Force | Out-Null
+        }
+    }
+
+    if ($null -ne $matchedRule -and -not [bool]$matchedRule.afterExecute) {
+        return New-NativeResult -ExitCode ([int]$matchedRule.exitCode) -Lines @("injected failure rule $ruleIndex")
+    }
+
+    if ($File -ieq 'git') {
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& git @Arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+    } elseif ($File -ieq 'docker') {
+        $exitCode = 0
+        if ($Arguments.Count -ge 2 -and $Arguments[0] -ceq 'inspect' -and $Arguments[1] -ceq $MysqlContainer) {
+            $output = @('[{"Id":"isolated-mysql","State":{"Health":{"Status":"healthy"}},"Mounts":[{"Destination":"/var/lib/mysql","Name":"shuqi-db-agent-mysql-data"}]}]')
+        } elseif ($Arguments.Count -ge 2 -and $Arguments[0] -ceq 'exec' -and $Arguments -contains 'safe.directory') {
+            $output = @('/workspace')
+        } else {
+            $output = @()
+        }
+    } else {
+        throw "Isolated contract refused native executable '$File'"
+    }
+
+    if ($null -ne $matchedRule -and [bool]$matchedRule.afterExecute) {
+        return New-NativeResult -ExitCode ([int]$matchedRule.exitCode) -Lines $output
+    }
     return New-NativeResult -ExitCode $exitCode -Lines $output
 }
 
@@ -59,7 +179,7 @@ function Invoke-GitQuery {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string[]]$Arguments
     )
-    if ($script:ContractMode) {
+    if ($script:ContractMode -and $script:ContractModeName -ceq 'preflight') {
         [Console]::Out.WriteLine("QUERY:$Name")
         $result = Get-ScenarioProperty -Name $Name
         return New-NativeResult -ExitCode ([int]$result.exitCode) -Lines @($result.lines)
@@ -105,6 +225,20 @@ function Get-Port3306Listeners {
         })
     }
     return @(Get-NetTCPConnection -State Listen -LocalPort 3306 -ErrorAction Stop)
+}
+
+function Get-Port3307Listeners {
+    if ($script:ContractMode) {
+        $mockListeners = Get-ScenarioProperty -Name 'listeners3307'
+        return @($mockListeners | ForEach-Object {
+            [pscustomobject]@{
+                LocalAddress = [string]$_.localAddress
+                LocalPort = [int]$_.localPort
+                OwningProcess = [int]$_.owningProcess
+            }
+        })
+    }
+    return @(Get-NetTCPConnection -State Listen -LocalPort 3307 -ErrorAction Stop)
 }
 
 function Get-ListenerSignatures {
@@ -169,7 +303,7 @@ function Invoke-RollbackPreflight {
         throw 'Every TCP/3306 listener must belong to MySQL57'
     }
 
-    if ($script:ContractMode) {
+    if ($script:ContractMode -and $script:ContractModeName -ceq 'preflight') {
         return [pscustomobject]@{
             Root = $actualRoot
             PreRollbackHead = $preRollbackHead
@@ -180,7 +314,7 @@ function Invoke-RollbackPreflight {
 
     $mysqlInspect = Invoke-Native -File 'docker' -Arguments @('inspect', $MysqlContainer)
     Assert-NativeSucceeded -Result $mysqlInspect -Evidence 'Cannot inspect teaching MySQL baseline'
-    $mysql = ($mysqlInspect.Lines -join "`n") | ConvertFrom-Json
+    $mysql = @(($mysqlInspect.Lines -join "`n") | ConvertFrom-Json)
     if ($mysql.Count -ne 1 -or $mysql[0].State.Health.Status -cne 'healthy') {
         throw 'Healthy teaching MySQL baseline required'
     }
@@ -191,8 +325,8 @@ function Invoke-RollbackPreflight {
     $volumeInspect = Invoke-Native -File 'docker' -Arguments @('volume', 'inspect', $MysqlVolume)
     Assert-NativeSucceeded -Result $volumeInspect -Evidence 'Teaching volume baseline missing'
 
-    $listeners3307 = @(Get-NetTCPConnection -State Listen -LocalPort 3307 -ErrorAction Stop)
-    $port3307 = Get-ListenerSignatures -Listeners $listeners3307
+    $listeners3307 = @(Get-Port3307Listeners)
+    $port3307 = @(Get-ListenerSignatures -Listeners $listeners3307)
     if ($port3307.Count -ne 1 -or -not $port3307[0].StartsWith('127.0.0.1|3307|')) {
         throw 'Loopback-only TCP/3307 teaching listener baseline mismatch'
     }
@@ -203,7 +337,7 @@ function Invoke-RollbackPreflight {
         MySqlId = [string]$mysql[0].Id
         MySqlVolume = [string]$dataMount[0].Name
         MySql57Pid = $mysql57.ProcessId
-        Port3306 = Get-ListenerSignatures -Listeners $listeners3306
+        Port3306 = @(Get-ListenerSignatures -Listeners $listeners3306)
         Port3307 = $port3307
     }
 }
@@ -255,11 +389,8 @@ function Assert-IndexReadyForRollbackCommit {
 
 function Restore-PreRollbackTrackedState {
     param([Parameter(Mandatory)][string]$PreRollbackHead)
-    if ($script:ContractMode) {
+    if (Test-IsolatedContractMode) {
         [Console]::Out.WriteLine('RECOVERY:tracked-state')
-        $mockFailures = $script:Scenario.PSObject.Properties['recoveryFailures']
-        if ($null -eq $mockFailures) { return @() }
-        return @($mockFailures.Value | ForEach-Object { [string]$_ })
     }
     $failures = [Collections.Generic.List[string]]::new()
     $gitDirResult = Invoke-Native -File 'git' -Arguments @('rev-parse', '--git-dir')
@@ -268,9 +399,7 @@ function Restore-PreRollbackTrackedState {
     } else {
         $sequencerPath = Join-Path (Get-NormalizedPath -Path $gitDirResult.Lines[0]) 'sequencer'
         if (Test-Path -LiteralPath $sequencerPath) {
-            $AbortCommand = 'git revert --abort'
-            $abortParts = $AbortCommand -split ' '
-            $abortResult = Invoke-Native -File $abortParts[0] -Arguments $abortParts[1..($abortParts.Count - 1)]
+            $abortResult = Invoke-Native -File 'git' -Arguments @('revert', '--abort')
             if ($abortResult.ExitCode -ne 0) {
                 $failures.Add("revert abort failed with native exit $($abortResult.ExitCode)")
             }
@@ -322,9 +451,8 @@ function Assert-WorkspaceSystemTrust {
 
 function Restore-PreRollbackWorkspace {
     param([Parameter(Mandatory)]$Baseline)
-    if ($script:ContractMode) {
+    if (Test-IsolatedContractMode) {
         [Console]::Out.WriteLine('RECOVERY:workspace')
-        return
     }
     if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
         throw "Pre-rollback environment file missing: $EnvFile"
@@ -357,30 +485,11 @@ function Invoke-AutomaticRecovery {
     return @($recoveryFailures)
 }
 
-function Invoke-ContractRollbackSimulation {
-    param([Parameter(Mandatory)]$Baseline)
-    $failureProperty = $script:Scenario.PSObject.Properties['workflowFailure']
-    if ($null -eq $failureProperty) {
-        [Console]::Out.WriteLine('MUTATION:rollback-boundary')
-        return
-    }
-    $workspaceProperty = $script:Scenario.PSObject.Properties['workspaceMutationAttempted']
-    $workspaceMutationAttempted = $false
-    if ($null -ne $workspaceProperty) { $workspaceMutationAttempted = [bool]$workspaceProperty.Value }
-    [Console]::Out.WriteLine('MUTATION:rollback-attempt')
-    $originalFailure = [string]$failureProperty.Value
-    $recoveryFailures = @(Invoke-AutomaticRecovery -Baseline $Baseline -WorkspaceMutationAttempted $workspaceMutationAttempted)
-    if ($recoveryFailures.Count -ne 0) {
-        throw "MANUAL RECOVERY REQUIRED; original='$originalFailure'; preRollbackHead='$($Baseline.PreRollbackHead)'; workspaceMutationAttempted=$workspaceMutationAttempted; recoveryFailures='$($recoveryFailures -join ' | ')'"
-    }
-    throw "Rollback failed and automatic pre-rollback restoration was verified: $originalFailure"
-}
-
 function Assert-RuntimeUnchanged {
     param([Parameter(Mandatory)]$Baseline)
     $mysqlInspect = Invoke-Native -File 'docker' -Arguments @('inspect', $MysqlContainer)
     Assert-NativeSucceeded -Result $mysqlInspect -Evidence 'Cannot inspect teaching MySQL after rollback'
-    $mysql = ($mysqlInspect.Lines -join "`n") | ConvertFrom-Json
+    $mysql = @(($mysqlInspect.Lines -join "`n") | ConvertFrom-Json)
     $mount = @($mysql[0].Mounts | Where-Object { $_.Destination -eq '/var/lib/mysql' })
     if ($mysql.Count -ne 1 -or $mysql[0].Id -cne $Baseline.MySqlId -or
         $mysql[0].State.Health.Status -cne 'healthy' -or $mount.Count -ne 1 -or
@@ -394,10 +503,64 @@ function Assert-RuntimeUnchanged {
     if ($mysql57.Status -cne 'Running' -or $mysql57.ProcessId -ne $Baseline.MySql57Pid) {
         throw 'MySQL57 status or PID changed during rollback'
     }
-    $port3306 = Get-ListenerSignatures -Listeners @(Get-Port3306Listeners)
-    $port3307 = Get-ListenerSignatures -Listeners @(Get-NetTCPConnection -State Listen -LocalPort 3307 -ErrorAction Stop)
+    $port3306 = @(Get-ListenerSignatures -Listeners @(Get-Port3306Listeners))
+    $port3307 = @(Get-ListenerSignatures -Listeners @(Get-Port3307Listeners))
     if (Compare-Object $Baseline.Port3306 $port3306) { throw 'TCP/3306 listeners changed' }
     if (Compare-Object $Baseline.Port3307 $port3307) { throw 'TCP/3307 listeners changed' }
+}
+
+function Read-RollbackLogConfirmation {
+    if (Test-IsolatedContractMode) {
+        $editedBytes = [Convert]::FromBase64String([string]$script:Scenario.editedLogBase64)
+        [IO.File]::WriteAllBytes($LogPath, $editedBytes)
+        return [string]$script:Scenario.confirmation
+    }
+    return Read-Host "Append the actual rollback record to $LogPath, then type ROLLBACK-LOG-APPENDED"
+}
+
+function Assert-AppendOnlyRollbackLog {
+    param(
+        [Parameter(Mandatory)][byte[]]$OriginalBytes,
+        [Parameter(Mandatory)][byte[]]$EditedBytes
+    )
+    if ($EditedBytes.Length -le $OriginalBytes.Length) {
+        throw 'Rollback log append-only validation failed: edited log must be longer than the exact restored log'
+    }
+    for ($index = 0; $index -lt $OriginalBytes.Length; $index++) {
+        if ($EditedBytes[$index] -ne $OriginalBytes[$index]) {
+            throw "Rollback log append-only validation failed: original byte changed at offset $index"
+        }
+    }
+    $suffixLength = $EditedBytes.Length - $OriginalBytes.Length
+    $suffixBytes = [byte[]]::new($suffixLength)
+    [Array]::Copy($EditedBytes, $OriginalBytes.Length, $suffixBytes, 0, $suffixLength)
+    try {
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $suffixText = $utf8.GetString($suffixBytes)
+    } catch {
+        throw 'Rollback log append-only validation failed: appended suffix is not valid UTF-8'
+    }
+    if ([string]::IsNullOrWhiteSpace($suffixText)) {
+        throw 'Rollback log appended suffix must contain non-whitespace evidence'
+    }
+    return $suffixText
+}
+
+function Assert-AppendedLogSecretSafe {
+    param([Parameter(Mandatory)][string]$AppendedText)
+    $secretPatterns = @(
+        '(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----',
+        '(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b',
+        '(?i)\bsk-[A-Za-z0-9_-]{20,}\b',
+        '(?i)\bAKIA[A-Z0-9]{16}\b',
+        '(?im)\b(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["'']?[^\s"'']{8,}',
+        '(?i)\b(mysql|postgres(?:ql)?|https?)://[^/\s:@]+:[^@\s/]{4,}@'
+    )
+    foreach ($pattern in $secretPatterns) {
+        if ([regex]::IsMatch($AppendedText, $pattern)) {
+            throw 'Rollback log secret-safety validation rejected the appended suffix'
+        }
+    }
 }
 
 function Invoke-Rollback {
@@ -406,8 +569,6 @@ function Invoke-Rollback {
     $workspaceMutationAttempted = $false
     $commitSucceeded = $false
     try {
-        Ensure-LocalProcessExclusion
-
         $markerResult = Invoke-Native -File 'git' -Arguments @('log', '--format=%H%x09%s', "--grep=$Marker")
         Assert-NativeSucceeded -Result $markerResult -Evidence 'Cannot resolve rollback marker'
         if ($markerResult.Lines.Count -ne 1) { throw 'Rollback marker must resolve to exactly one commit' }
@@ -425,18 +586,22 @@ function Invoke-Rollback {
         Assert-NativeSucceeded -Result $commitList -Evidence 'Cannot resolve rollback commit list'
         if ($commitList.Lines.Count -eq 0) { throw 'Rollback commit list is empty' }
 
-        $RevertCommand = 'git revert --no-commit'
-        $revertParts = $RevertCommand -split ' '
+        Ensure-LocalProcessExclusion
+
         $rollbackMutationAttempted = $true
-        $revert = Invoke-Native -File $revertParts[0] -Arguments @($revertParts[1..($revertParts.Count - 1)] + $commitList.Lines)
+        $revert = Invoke-Native -File 'git' -Arguments (@('revert', '--no-commit') + $commitList.Lines)
         Assert-NativeSucceeded -Result $revert -Evidence 'Rollback revert failed'
 
         $preserveLog = Invoke-Native -File 'git' -Arguments @(
             'restore', "--source=$($Baseline.PreRollbackHead)", '--staged', '--worktree', '--', $LogPath
         )
         Assert-NativeSucceeded -Result $preserveLog -Evidence 'Failed to preserve complete development log'
-        $confirmation = Read-Host "Append the actual rollback record to $LogPath, then type ROLLBACK-LOG-APPENDED"
+        $restoredLogBytes = [IO.File]::ReadAllBytes($LogPath)
+        $confirmation = Read-RollbackLogConfirmation
         if ($confirmation -cne 'ROLLBACK-LOG-APPENDED') { throw 'Rollback log confirmation cancelled' }
+        $editedLogBytes = [IO.File]::ReadAllBytes($LogPath)
+        $appendedText = Assert-AppendOnlyRollbackLog -OriginalBytes $restoredLogBytes -EditedBytes $editedLogBytes
+        Assert-AppendedLogSecretSafe -AppendedText $appendedText
         $stageLog = Invoke-Native -File 'git' -Arguments @('add', '--', $LogPath)
         Assert-NativeSucceeded -Result $stageLog -Evidence 'Failed to stage appended rollback log'
         $logDiff = Invoke-Native -File 'git' -Arguments @('diff', '--cached', '--quiet', '--', $LogPath)
@@ -455,9 +620,7 @@ function Invoke-Rollback {
         Assert-RuntimeUnchanged -Baseline $Baseline
 
         Assert-IndexReadyForRollbackCommit
-        $CommitCommand = 'git commit'
-        $commitParts = $CommitCommand -split ' '
-        $commit = Invoke-Native -File $commitParts[0] -Arguments @($commitParts[1..($commitParts.Count - 1)] + @('-m', 'Rollback complete environment stage'))
+        $commit = Invoke-Native -File 'git' -Arguments @('commit', '-m', 'Rollback complete environment stage')
         Assert-NativeSucceeded -Result $commit -Evidence 'Rollback commit failed'
         $commitSucceeded = $true
     } catch {
@@ -473,9 +636,7 @@ function Invoke-Rollback {
     }
 
     Assert-FullStatusClean
-    $PushCommand = 'git push'
-    $pushParts = $PushCommand -split ' '
-    $push = Invoke-Native -File $pushParts[0] -Arguments @($pushParts[1..($pushParts.Count - 1)] + @('origin', 'main'))
+    $push = Invoke-Native -File 'git' -Arguments @('push', 'origin', 'main')
     if ($push.ExitCode -ne 0) {
         throw "MANUAL RECOVERY REQUIRED; rollback commit exists locally but push failed with native exit $($push.ExitCode)"
     }
@@ -492,8 +653,8 @@ function Invoke-Rollback {
 
 try {
     $baseline = Invoke-RollbackPreflight
-    if ($script:ContractMode) {
-        Invoke-ContractRollbackSimulation -Baseline $baseline
+    if ($script:ContractMode -and $script:ContractModeName -ceq 'preflight') {
+        [Console]::Out.WriteLine('MUTATION:rollback-boundary')
         exit 0
     }
     Invoke-Rollback -Baseline $baseline
