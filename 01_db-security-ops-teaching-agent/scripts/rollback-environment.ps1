@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $ExpectedRoot = 'F:\project_shuqi'
 $Base = '25351d020a9ef413d9288010028acba579fe7938'
-$Marker = '^Close executable rollback review gaps$'
+$Marker = '^Close final rollback security gates$'
 $LogPath = '01_db-security-ops-teaching-agent/04_开发日志.md'
 $AgentRoot = '01_db-security-ops-teaching-agent'
 $ComposeFile = "$AgentRoot/infra/compose.yaml"
@@ -21,6 +21,8 @@ $script:Scenario = $null
 $script:ContractMode = -not [string]::IsNullOrWhiteSpace($ContractTestScenario)
 $script:ContractModeName = ''
 $script:FailureRuleCounts = @{}
+$script:AuthorizedPreRollbackHead = ''
+$script:AuthorizedRollbackCommits = @()
 
 function Assert-IsolatedContractRoot {
     param(
@@ -74,11 +76,120 @@ function Get-ScenarioProperty {
     return $property.Value
 }
 
+function Test-ExactArgumentVector {
+    param(
+        [Parameter(Mandatory)][string[]]$Actual,
+        [Parameter(Mandatory)][string[]]$Expected
+    )
+    if ($Actual.Count -ne $Expected.Count) { return $false }
+    for ($index = 0; $index -lt $Actual.Count; $index++) {
+        if (-not [StringComparer]::Ordinal.Equals($Actual[$index], $Expected[$index])) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Assert-NativeCommandAllowed {
+    param(
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    $allowed = $false
+    if ($File -ceq 'git') {
+        $allowed =
+            (Test-ExactArgumentVector $Arguments @('rev-parse', '--show-toplevel')) -or
+            (Test-ExactArgumentVector $Arguments @('branch', '--show-current')) -or
+            (Test-ExactArgumentVector $Arguments @('status', '--porcelain=v1', '--untracked-files=all')) -or
+            (Test-ExactArgumentVector $Arguments @('rev-parse', 'HEAD')) -or
+            (Test-ExactArgumentVector $Arguments @('ls-remote', 'origin', 'refs/heads/main')) -or
+            (Test-ExactArgumentVector $Arguments @('rev-parse', '--git-dir')) -or
+            (Test-ExactArgumentVector $Arguments @('revert', '--abort')) -or
+            (Test-ExactArgumentVector $Arguments @('diff', '--quiet')) -or
+            (Test-ExactArgumentVector $Arguments @('diff', '--cached', '--quiet')) -or
+            (Test-ExactArgumentVector $Arguments @('commit', '-m', 'Rollback complete environment stage')) -or
+            (Test-ExactArgumentVector $Arguments @('push', 'origin', 'main'))
+
+        if (-not $allowed -and $Arguments.Count -eq 3 -and
+            $Arguments[0] -ceq 'log' -and $Arguments[1] -ceq '--format=%H%x09%s' -and
+            $Arguments[2] -ceq "--grep=$Marker") {
+            $allowed = $true
+        }
+        if (-not $allowed -and $Arguments.Count -eq 4 -and
+            $Arguments[0] -ceq 'merge-base' -and $Arguments[1] -ceq '--is-ancestor' -and
+            $Arguments[2] -cmatch '^[0-9a-f]{40}$' -and $Arguments[3] -cmatch '^[0-9a-f]{40}$') {
+            $allowed = $true
+        }
+        if (-not $allowed -and $Arguments.Count -eq 3 -and
+            $Arguments[0] -ceq 'rev-list' -and $Arguments[1] -ceq '--merges' -and
+            $Arguments[2] -cmatch '^[0-9a-f]{40}\.\.[0-9a-f]{40}$') {
+            $allowed = $true
+        }
+        if (-not $allowed -and $Arguments.Count -eq 2 -and
+            $Arguments[0] -ceq 'rev-list' -and
+            $Arguments[1] -cmatch '^[0-9a-f]{40}\.\.[0-9a-f]{40}$') {
+            $allowed = $true
+        }
+        $authorizedCommits = @($script:AuthorizedRollbackCommits)
+        if (-not $allowed -and $authorizedCommits.Count -gt 0) {
+            $authorizedRevert = @('revert', '--no-commit') + $authorizedCommits
+            $allowed = Test-ExactArgumentVector $Arguments $authorizedRevert
+        }
+        $authorizedHead = [string]$script:AuthorizedPreRollbackHead
+        if (-not $allowed -and $authorizedHead -cmatch '^[0-9a-f]{40}$' -and
+            $Arguments.Count -eq 6 -and $Arguments[0] -ceq 'restore' -and
+            $Arguments[1] -ceq "--source=$authorizedHead" -and
+            $Arguments[2] -ceq '--staged' -and $Arguments[3] -ceq '--worktree' -and
+            $Arguments[4] -ceq '--' -and ($Arguments[5] -ceq '.' -or $Arguments[5] -ceq $LogPath)) {
+            $allowed = $true
+        }
+        if (-not $allowed -and $Arguments.Count -eq 3 -and
+            $Arguments[0] -ceq 'add' -and $Arguments[1] -ceq '--' -and $Arguments[2] -ceq $LogPath) {
+            $allowed = $true
+        }
+        if (-not $allowed -and $Arguments.Count -eq 5 -and
+            $Arguments[0] -ceq 'diff' -and $Arguments[1] -ceq '--cached' -and
+            $Arguments[2] -ceq '--quiet' -and $Arguments[3] -ceq '--' -and $Arguments[4] -ceq $LogPath) {
+            $allowed = $true
+        }
+    } elseif ($File -ceq 'docker') {
+        $allowed =
+            (Test-ExactArgumentVector $Arguments @('inspect', $MysqlContainer)) -or
+            (Test-ExactArgumentVector $Arguments @('volume', 'inspect', $MysqlVolume)) -or
+            (Test-ExactArgumentVector $Arguments @(
+                'exec', '-u', 'vscode', $WorkspaceContainer,
+                'git', 'config', '--system', '--get-all', 'safe.directory'
+            )) -or
+            (Test-ExactArgumentVector $Arguments @(
+                'exec', '-u', 'vscode', $WorkspaceContainer, 'pytest', '-q'
+            ))
+
+        $composePrefix = @(
+            'compose', '--project-name', $ProjectName, '--env-file', $EnvFile, '-f', $ComposeFile
+        )
+        if (-not $allowed -and $Arguments.Count -ge $composePrefix.Count) {
+            $prefix = @($Arguments[0..($composePrefix.Count - 1)])
+            $tail = @($Arguments[$composePrefix.Count..($Arguments.Count - 1)])
+            if (Test-ExactArgumentVector $prefix $composePrefix) {
+                $allowed =
+                    (Test-ExactArgumentVector $tail @('config', '--quiet')) -or
+                    (Test-ExactArgumentVector $tail @(
+                        'up', '-d', '--build', '--no-deps', '--force-recreate', 'workspace'
+                    ))
+            }
+        }
+    }
+    if (-not $allowed) {
+        throw 'Native command rejected by rollback runtime allowlist'
+    }
+}
+
 function Invoke-Native {
     param(
         [Parameter(Mandatory)][string]$File,
         [Parameter(Mandatory)][string[]]$Arguments
     )
+    Assert-NativeCommandAllowed -File $File -Arguments $Arguments
     if (-not (Test-IsolatedContractMode)) {
         $previousPreference = $ErrorActionPreference
         try {
@@ -123,6 +234,7 @@ function Invoke-Native {
     if ($null -ne $matchedRule) {
         $sequencerProperty = $matchedRule.PSObject.Properties['createSequencer']
         if ($null -ne $sequencerProperty -and [bool]$sequencerProperty.Value) {
+            Assert-NativeCommandAllowed -File 'git' -Arguments @('rev-parse', '--git-dir')
             $previousPreference = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'
@@ -546,8 +658,42 @@ function Assert-AppendOnlyRollbackLog {
     return $suffixText
 }
 
+function Get-PrivatePasswordValues {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'Rollback secret-safety validation requires the runtime environment file'
+    }
+    $values = [Collections.Generic.List[string]]::new()
+    foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) { continue }
+        $separator = $trimmed.IndexOf('=')
+        if ($separator -le 0) { continue }
+        $name = $trimmed.Substring(0, $separator).Trim()
+        if ($name -notmatch 'PASSWORD') { continue }
+        $value = $trimmed.Substring($separator + 1).Trim()
+        if ($value.Length -ge 2 -and
+            (($value[0] -ceq '"' -and $value[$value.Length - 1] -ceq '"') -or
+             ($value[0] -ceq "'" -and $value[$value.Length - 1] -ceq "'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        if (-not $values.Contains($value)) { $values.Add($value) }
+    }
+    return @($values)
+}
+
 function Assert-AppendedLogSecretSafe {
-    param([Parameter(Mandatory)][string]$AppendedText)
+    param(
+        [Parameter(Mandatory)][string]$AppendedText,
+        [Parameter(Mandatory)][string[]]$PrivatePasswordValues
+    )
+    foreach ($privateValue in $PrivatePasswordValues) {
+        if (-not [string]::IsNullOrWhiteSpace($privateValue) -and
+            $AppendedText.Contains($privateValue)) {
+            throw 'Rollback log secret-safety validation rejected the appended suffix'
+        }
+    }
     $secretPatterns = @(
         '(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----',
         '(?i)\bgh[pousr]_[A-Za-z0-9]{20,}\b',
@@ -585,6 +731,7 @@ function Invoke-Rollback {
         $commitList = Invoke-Native -File 'git' -Arguments @('rev-list', "$Base..$rollbackHead")
         Assert-NativeSucceeded -Result $commitList -Evidence 'Cannot resolve rollback commit list'
         if ($commitList.Lines.Count -eq 0) { throw 'Rollback commit list is empty' }
+        $script:AuthorizedRollbackCommits = @($commitList.Lines)
 
         Ensure-LocalProcessExclusion
 
@@ -601,7 +748,8 @@ function Invoke-Rollback {
         if ($confirmation -cne 'ROLLBACK-LOG-APPENDED') { throw 'Rollback log confirmation cancelled' }
         $editedLogBytes = [IO.File]::ReadAllBytes($LogPath)
         $appendedText = Assert-AppendOnlyRollbackLog -OriginalBytes $restoredLogBytes -EditedBytes $editedLogBytes
-        Assert-AppendedLogSecretSafe -AppendedText $appendedText
+        $privatePasswordValues = @(Get-PrivatePasswordValues -Path $EnvFile)
+        Assert-AppendedLogSecretSafe -AppendedText $appendedText -PrivatePasswordValues $privatePasswordValues
         $stageLog = Invoke-Native -File 'git' -Arguments @('add', '--', $LogPath)
         Assert-NativeSucceeded -Result $stageLog -Evidence 'Failed to stage appended rollback log'
         $logDiff = Invoke-Native -File 'git' -Arguments @('diff', '--cached', '--quiet', '--', $LogPath)
@@ -657,6 +805,7 @@ try {
         [Console]::Out.WriteLine('MUTATION:rollback-boundary')
         exit 0
     }
+    $script:AuthorizedPreRollbackHead = [string]$baseline.PreRollbackHead
     Invoke-Rollback -Baseline $baseline
     Write-Host 'Rollback completed with verified runtime and remote state.'
 } catch {
