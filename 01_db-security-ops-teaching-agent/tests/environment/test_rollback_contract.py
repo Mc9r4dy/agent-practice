@@ -3,6 +3,8 @@ import json
 import os
 import re
 import secrets
+import shlex
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -44,7 +46,7 @@ def test_rollback_has_one_documented_entry_point_and_one_executable_source() -> 
     assert ROLLBACK.is_file(), "canonical rollback helper must be versioned"
     helper = ROLLBACK.read_text(encoding="utf-8")
     assert helper.count("$Base = '25351d020a9ef413d9288010028acba579fe7938'") == 1
-    assert helper.count("$Marker = '^Close final rollback security gates$'") == 1
+    assert helper.count("$Marker = '^Enforce repository-wide rollback source uniqueness$'") == 1
     for duplicate_source in (usage, plan):
         assert "25351d020a9ef413d9288010028acba579fe7938" not in duplicate_source
         assert "^Close final Dev Container review gaps$" not in duplicate_source
@@ -191,7 +193,7 @@ def create_isolated_rollback_repository(tmp_path: Path) -> dict:
     (work / "stage.txt").write_text("environment-two\n", encoding="utf-8")
     log.write_bytes(log.read_bytes() + b"pre-rollback-entry\r\n")
     git(work, "add", "stage.txt", str(log.relative_to(work)))
-    git(work, "commit", "-m", "Close final rollback security gates")
+    git(work, "commit", "-m", "Enforce repository-wide rollback source uniqueness")
     head = git(work, "rev-parse", "HEAD")
     original_log = log.read_bytes()
 
@@ -216,7 +218,7 @@ def isolated_scenario(repo: dict, edited_log: bytes | None = None) -> dict:
         "mode": "isolated",
         "expectedRoot": str(repo["work"]),
         "base": repo["base"],
-        "marker": "^Close final rollback security gates$",
+        "marker": "^Enforce repository-wide rollback source uniqueness$",
         "logPath": str(repo["log"].relative_to(repo["work"])).replace("\\", "/"),
         "mysql57": {"status": "Running", "pid": 4242},
         "listeners3306": [
@@ -794,6 +796,89 @@ def resolved_rollback_entry_points(commands: list[dict]) -> list[str]:
     return findings
 
 
+def rollback_git_commands(commands: list[dict]) -> list[str]:
+    findings = []
+    for command in commands:
+        tokens = executable_tokens(command["text"])
+        tokens.extend(token.lower() for token in command.get("resolvedTokens", []))
+        if "git" in tokens and "revert" in tokens and "--no-commit" in tokens:
+            findings.append(command["text"])
+    return findings
+
+
+def _expand_shell_constants(token: str, constants: dict[str, str]) -> str:
+    pattern = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        return constants.get(name, match.group(0))
+
+    previous = None
+    while previous != token:
+        previous = token
+        token = pattern.sub(replace, token)
+    return token
+
+
+def shell_rollback_findings(source: str) -> list[str]:
+    constants: dict[str, str] = {}
+    findings = []
+    assignment = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = assignment.fullmatch(line)
+        if match:
+            try:
+                values = shlex.split(match.group(2), comments=True, posix=True)
+            except ValueError:
+                constants.pop(match.group(1), None)
+                continue
+            if len(values) == 1:
+                constants[match.group(1)] = _expand_shell_constants(values[0], constants)
+            else:
+                constants.pop(match.group(1), None)
+            continue
+        try:
+            tokens = [
+                _expand_shell_constants(token, constants).lower()
+                for token in shlex.split(line, comments=True, posix=True)
+            ]
+        except ValueError:
+            findings.append(stripped)
+            continue
+        if not tokens:
+            continue
+        normalized = [token.replace("\\", "/") for token in tokens]
+        invokes_helper = any(
+            token.endswith("rollback-environment.ps1") for token in normalized
+        ) and (
+            normalized[0].endswith("rollback-environment.ps1")
+            or normalized[0] in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+        )
+        if (
+            normalized[0] == "invoke-rollback"
+            or invokes_helper
+            or (
+                normalized[0] == "git"
+                and "revert" in normalized
+                and "--no-commit" in normalized
+            )
+        ):
+            findings.append(stripped)
+    return findings
+
+
+def unapproved_dangerous_commands(relative: Path, commands: list[dict]) -> list[str]:
+    dangerous = dangerous_ast_commands(commands)
+    sandbox = Path(ROOT.name) / "scripts/sandbox.ps1"
+    if relative != sandbox:
+        return dangerous
+    guarded_rebuild = "Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')"
+    return [command for command in dangerous if command != guarded_rebuild]
+
+
 @pytest.mark.skipif(
     sys.platform != "win32",
     reason="PowerShell executable-code AST gate runs on the Windows host",
@@ -963,9 +1048,9 @@ def test_production_ast_proves_required_calls_and_control_order() -> None:
 
 SUPPORTED_EXECUTABLE_SUFFIXES = {".ps1", ".psm1", ".cmd", ".bat", ".sh"}
 EXPECTED_EXECUTABLE_SOURCES = {
-    Path("infra/mysql/init/004_accounts.sh"),
-    Path("scripts/rollback-environment.ps1"),
-    Path("scripts/sandbox.ps1"),
+    Path(ROOT.name) / "infra/mysql/init/004_accounts.sh",
+    Path(ROOT.name) / "scripts/rollback-environment.ps1",
+    Path(ROOT.name) / "scripts/sandbox.ps1",
 }
 
 
@@ -978,6 +1063,53 @@ def executable_source_files(root: Path) -> list[Path]:
             continue
         sources.append(path)
     return sorted(sources)
+
+
+def git_repository_root(start: Path) -> Path:
+    return Path(git(start, "rev-parse", "--show-toplevel")).resolve()
+
+
+def repository_source_gate_findings(start: Path) -> list[str]:
+    repository_root = git_repository_root(start)
+    findings: list[str] = []
+    sources = executable_source_files(repository_root)
+    relative_sources = {path.relative_to(repository_root) for path in sources}
+    for path in sorted(relative_sources - EXPECTED_EXECUTABLE_SOURCES):
+        findings.append(f"unexpected executable source: {path.as_posix()}")
+    for path in sorted(EXPECTED_EXECUTABLE_SOURCES - relative_sources):
+        findings.append(f"missing executable source: {path.as_posix()}")
+
+    canonical = Path(ROOT.name) / "scripts/rollback-environment.ps1"
+    for relative in sorted(relative_sources & EXPECTED_EXECUTABLE_SOURCES):
+        source = repository_root / relative
+        if source.suffix.lower() in {".ps1", ".psm1"}:
+            commands = powershell_command_asts(source)
+            if unapproved_dangerous_commands(relative, commands):
+                findings.append(f"dangerous PowerShell command: {relative.as_posix()}")
+            if relative != canonical and (
+                resolved_rollback_entry_points(commands) or rollback_git_commands(commands)
+            ):
+                findings.append(f"noncanonical rollback behavior: {relative.as_posix()}")
+        elif source.suffix.lower() == ".sh":
+            if shell_rollback_findings(source.read_text(encoding="utf-8")):
+                findings.append(f"noncanonical rollback behavior: {relative.as_posix()}")
+    return findings
+
+
+def create_repository_source_fixture(tmp_path: Path) -> Path:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    agent = repository / ROOT.name
+    for relative in (
+        Path("scripts/rollback-environment.ps1"),
+        Path("scripts/sandbox.ps1"),
+        Path("infra/mysql/init/004_accounts.sh"),
+    ):
+        target = agent / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    return repository
 
 
 @pytest.mark.parametrize("suffix", sorted(SUPPORTED_EXECUTABLE_SUFFIXES))
@@ -997,7 +1129,10 @@ def test_source_enumeration_detects_duplicate_supported_entry_points(
 ) -> None:
     canonical = tmp_path / "rollback-environment.ps1"
     duplicate = tmp_path / f"duplicate{suffix}"
-    canonical.write_text("$Marker = '^Close final rollback security gates$'", encoding="utf-8")
+    canonical.write_text(
+        "$Marker = '^Enforce repository-wide rollback source uniqueness$'",
+        encoding="utf-8",
+    )
     duplicate.write_text("powershell ./rollback-environment.ps1", encoding="utf-8")
     assert executable_source_files(tmp_path) == [duplicate, canonical]
 
@@ -1018,10 +1153,100 @@ def test_source_enumeration_detects_noncontiguous_wrapper_revert_tokens(
 
 
 def test_repository_has_exactly_one_supported_executable_rollback_source() -> None:
+    repository_root = git_repository_root(ROOT)
+    assert repository_root == REPO_ROOT.resolve()
     relative_sources = {
-        path.relative_to(ROOT) for path in executable_source_files(ROOT)
+        path.relative_to(repository_root) for path in executable_source_files(repository_root)
     }
     assert relative_sources == EXPECTED_EXECUTABLE_SOURCES
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="repository-wide PowerShell semantic gate runs on the Windows host",
+)
+def test_repository_allowed_sources_pass_language_specific_semantic_gate() -> None:
+    assert repository_source_gate_findings(ROOT) == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="repository-wide PowerShell semantic gate runs on the Windows host",
+)
+@pytest.mark.parametrize(
+    "source",
+    [
+        "& (Join-Path $PSScriptRoot 'rollback-environment.ps1')",
+        "$leaf = 'rollback-' + 'environment.ps1'\n"
+        "$runner = 'powershell' + '.exe'\n"
+        "& $runner -File (Join-Path $PSScriptRoot $leaf)",
+        "git revert --no-commit ('a' * 40)",
+        "$tool = 'git'\n$parts = @('revert', '--no-commit', '"
+        + ("a" * 40)
+        + "')\n"
+        "Invoke-Native -File $tool -Arguments $parts",
+    ],
+)
+def test_repository_gate_rejects_semantic_mutants_in_allowed_sandbox(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    repository = create_repository_source_fixture(tmp_path)
+    sandbox = repository / ROOT.name / "scripts/sandbox.ps1"
+    sandbox.write_text(sandbox.read_text(encoding="utf-8") + "\n" + source + "\n", encoding="utf-8")
+    findings = repository_source_gate_findings(repository / ROOT.name)
+    assert any("sandbox.ps1" in finding for finding in findings)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="repository-root executable inventory runs on the Windows host",
+)
+def test_repository_gate_rejects_root_sibling_executable_duplicate(tmp_path: Path) -> None:
+    repository = create_repository_source_fixture(tmp_path)
+    duplicate = repository / "rollback-sibling.ps1"
+    duplicate.write_text(
+        "$leaf = 'rollback-' + 'environment.ps1'\n& powershell -File $leaf\n",
+        encoding="utf-8",
+    )
+    findings = repository_source_gate_findings(repository / ROOT.name)
+    assert any("rollback-sibling.ps1" in finding for finding in findings)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="repository-wide PowerShell semantic gate runs on the Windows host",
+)
+def test_repository_gate_ignores_inert_sandbox_comments_and_documentation(tmp_path: Path) -> None:
+    repository = create_repository_source_fixture(tmp_path)
+    sandbox = repository / ROOT.name / "scripts/sandbox.ps1"
+    sandbox.write_text(
+        sandbox.read_text(encoding="utf-8")
+        + "\n# git revert --no-commit and rollback-environment.ps1 are prohibited\n"
+        + "$documentation = 'Invoke-Rollback must remain in the canonical helper'\n",
+        encoding="utf-8",
+    )
+    assert repository_source_gate_findings(repository / ROOT.name) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "git revert --no-commit \"$sha\"",
+        "leaf='rollback-'\nleaf=\"${leaf}environment.ps1\"\n"
+        "runner='power'\nrunner=\"${runner}shell\"\n\"$runner\" \"$leaf\"",
+    ],
+)
+def test_shell_gate_rejects_executable_rollback_token_construction(source: str) -> None:
+    assert shell_rollback_findings(source)
+
+
+def test_shell_gate_ignores_comments_and_inert_documentation() -> None:
+    source = (
+        "# git revert --no-commit $sha\n"
+        "documentation='Invoke-Rollback and rollback-environment.ps1 are prohibited'\n"
+    )
+    assert shell_rollback_findings(source) == []
 
 
 @pytest.mark.skipif(
@@ -1062,7 +1287,7 @@ def test_design_status_and_documented_exclusion_order_are_current() -> None:
 def test_final_marker_and_dev045_correct_published_dev044_counts() -> None:
     helper = ROLLBACK.read_text(encoding="utf-8")
     log = DEV_LOG.read_text(encoding="utf-8")
-    assert helper.count("$Marker = '^Close final rollback security gates$'") == 1
+    assert helper.count("$Marker = '^Enforce repository-wide rollback source uniqueness$'") == 1
     assert log.count("## DEV-20260721-045：") == 1
     dev045 = log.split("## DEV-20260721-045：", 1)[1]
     assert "DEV-044" in dev045 and "更正" in dev045
@@ -1070,6 +1295,14 @@ def test_final_marker_and_dev045_correct_published_dev044_counts() -> None:
     assert "74 passed, 33 skipped" in dev045
     assert "71 passed" in dev045
     assert "80 passed, 52 skipped" in dev045
+
+
+def test_dev046_is_appended_exactly_once() -> None:
+    log = DEV_LOG.read_text(encoding="utf-8")
+    assert log.count("## DEV-20260721-046：") == 1
+    dev046 = log.split("## DEV-20260721-046：", 1)[1]
+    assert "82 passed in 199.38s" in dev046
+    assert "84 passed, 59 skipped in 5.63s" in dev046
 
 
 @pytest.mark.skipif(
