@@ -549,7 +549,7 @@ git ls-remote origin refs/heads/main
 - Consumes: Task 3 已运行的新 workspace。
 - Produces: 用户确认的 Dev Containers GUI 证据与开发环境阶段最终关闭状态。
 
-- [ ] **Step 1: 用户从正确的本地目录 Reopen**
+- [x] **Step 1: 用户从正确的本地目录 Reopen**
 
 在本地 Windows VS Code 选择 `File > Open Folder...`，打开：
 
@@ -559,7 +559,7 @@ F:\project_shuqi\01_db-security-ops-teaching-agent
 
 然后执行 `Dev Containers: Reopen in Container`。不要从 `F:\project_shuqi` 根窗口直接 Reopen。
 
-- [ ] **Step 2: 用户确认 GUI 与终端证据**
+- [x] **Step 2: 用户确认 GUI 与终端证据**
 
 在 Dev Container 终端运行：
 
@@ -588,7 +588,7 @@ Expected:
 
 `git.openRepositoryInParentFolders` 应通过 VS Code 远端设置界面确认值为 `always`；Git CLI 不暴露 VS Code 设置，因此必须以远端设置界面和 SCM 实际行为为证据。credential helper 命令只输出脱敏后的来源与键名，不得把完整值复制到日志。
 
-- [ ] **Step 3: 勾选最终环境完成条件**
+- [x] **Step 3: 勾选最终环境完成条件**
 
 只有用户确认 Step 2 后：
 
@@ -596,7 +596,7 @@ Expected:
 - 把 `06_开发环境与教学沙箱实施计划.md` 的原 Task 8 Step 6 改为 `[x]`；
 - 在 Implementation Status 写明环境阶段已关闭、下一阶段进入智能体 MVP。
 
-- [ ] **Step 4: 追加最终日志并执行全量验证**
+- [x] **Step 4: 追加最终日志并执行全量验证**
 
 日志记录用户确认时间、GUI 状态、容器路径、SCM、safe.directory、测试数、MySQL/端口未变和下一阶段。
 
@@ -609,7 +609,7 @@ git diff --check
 
 Expected: 23 passed；MySQL healthy；3307 loopback；MySQL57 Running；diff check 通过。
 
-- [ ] **Step 5: 最终提交、推送与 SHA 核对**
+- [x] **Step 5: 最终提交、推送与 SHA 核对**
 
 ```powershell
 git add -- 05_开发环境与教学沙箱设计.md 06_开发环境与教学沙箱实施计划.md 04_开发日志.md
