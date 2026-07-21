@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $ExpectedRoot = 'F:\project_shuqi'
 $Base = '25351d020a9ef413d9288010028acba579fe7938'
-$Marker = '^Bind sandbox Rebuild exception to its guard$'
+$Marker = '^Bind Rebuild guard to one AST clause$'
 $LogPath = '01_db-security-ops-teaching-agent/04_开发日志.md'
 $AgentRoot = '01_db-security-ops-teaching-agent'
 $ComposeFile = "$AgentRoot/infra/compose.yaml"

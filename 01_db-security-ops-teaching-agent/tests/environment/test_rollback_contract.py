@@ -46,7 +46,7 @@ def test_rollback_has_one_documented_entry_point_and_one_executable_source() -> 
     assert ROLLBACK.is_file(), "canonical rollback helper must be versioned"
     helper = ROLLBACK.read_text(encoding="utf-8")
     assert helper.count("$Base = '25351d020a9ef413d9288010028acba579fe7938'") == 1
-    assert helper.count("$Marker = '^Bind sandbox Rebuild exception to its guard$'") == 1
+    assert helper.count("$Marker = '^Bind Rebuild guard to one AST clause$'") == 1
     for duplicate_source in (usage, plan):
         assert "25351d020a9ef413d9288010028acba579fe7938" not in duplicate_source
         assert "^Close final Dev Container review gaps$" not in duplicate_source
@@ -193,7 +193,7 @@ def create_isolated_rollback_repository(tmp_path: Path) -> dict:
     (work / "stage.txt").write_text("environment-two\n", encoding="utf-8")
     log.write_bytes(log.read_bytes() + b"pre-rollback-entry\r\n")
     git(work, "add", "stage.txt", str(log.relative_to(work)))
-    git(work, "commit", "-m", "Bind sandbox Rebuild exception to its guard")
+    git(work, "commit", "-m", "Bind Rebuild guard to one AST clause")
     head = git(work, "rev-parse", "HEAD")
     original_log = log.read_bytes()
 
@@ -218,7 +218,7 @@ def isolated_scenario(repo: dict, edited_log: bytes | None = None) -> dict:
         "mode": "isolated",
         "expectedRoot": str(repo["work"]),
         "base": repo["base"],
-        "marker": "^Bind sandbox Rebuild exception to its guard$",
+        "marker": "^Bind Rebuild guard to one AST clause$",
         "logPath": str(repo["log"].relative_to(repo["work"])).replace("\\", "/"),
         "mysql57": {"status": "Running", "pid": 4242},
         "listeners3306": [
@@ -542,6 +542,10 @@ $assignments = @($ast.FindAll({
     param($node)
     $node -is [Management.Automation.Language.AssignmentStatementAst]
 }, $true) | Sort-Object { $_.Extent.StartOffset })
+$switches = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.SwitchStatementAst]
+}, $true) | Sort-Object { $_.Extent.StartOffset })
 
 function New-ConstantResolution {
     param([bool]$Known, [bool]$IsArray, [object[]]$Values)
@@ -669,13 +673,28 @@ function Get-SwitchClauseFacts {
     }
     if ($null -eq $switch) {
         return [pscustomobject]@{
+            switchIdentity = $null
+            clauseIdentity = $null
             conditionVariable = $null
             label = $null
             labelAstType = $null
             directCommandIndex = -1
         }
     }
-    foreach ($clause in @($switch.Clauses)) {
+    $switchOrdinal = -1
+    for ($index = 0; $index -lt $switches.Count; $index++) {
+        if ([object]::ReferenceEquals($switches[$index], $switch)) {
+            $switchOrdinal = $index
+            break
+        }
+    }
+    $switchIdentity = 'switch:{0}:{1}:{2}' -f @(
+        $switchOrdinal,
+        $switch.Extent.StartOffset,
+        $switch.Extent.EndOffset
+    )
+    for ($clauseOrdinal = 0; $clauseOrdinal -lt $switch.Clauses.Count; $clauseOrdinal++) {
+        $clause = $switch.Clauses[$clauseOrdinal]
         $labelAst = $clause.Item1
         $body = $clause.Item2
         if ($Command.Extent.StartOffset -lt $body.Extent.StartOffset -or
@@ -690,6 +709,15 @@ function Get-SwitchClauseFacts {
             }
         }
         return [pscustomobject]@{
+            switchIdentity = $switchIdentity
+            clauseIdentity = '{0}/clause:{1}:{2}:{3}:{4}:{5}' -f @(
+                $switchIdentity,
+                $clauseOrdinal,
+                $labelAst.Extent.StartOffset,
+                $labelAst.Extent.EndOffset,
+                $body.Extent.StartOffset,
+                $body.Extent.EndOffset
+            )
             conditionVariable = Get-VariableName $switch.Condition
             label = if ($labelAst -is [Management.Automation.Language.StringConstantExpressionAst]) {
                 [string]$labelAst.Value
@@ -699,6 +727,8 @@ function Get-SwitchClauseFacts {
         }
     }
     return [pscustomobject]@{
+        switchIdentity = $switchIdentity
+        clauseIdentity = $null
         conditionVariable = Get-VariableName $switch.Condition
         label = $null
         labelAstType = $null
@@ -744,6 +774,8 @@ $commands = @($ast.FindAll({
         line = $_.Extent.StartLineNumber
         functionName = if ($null -eq $ancestor) { $null } else { $ancestor.Name }
         resolvedTokens = @($resolvedTokens)
+        switchIdentity = $switchClause.switchIdentity
+        switchClauseIdentity = $switchClause.clauseIdentity
         switchConditionVariable = $switchClause.conditionVariable
         switchClauseLabel = $switchClause.label
         switchClauseLabelAstType = $switchClause.labelAstType
@@ -863,7 +895,9 @@ def has_structurally_guarded_sandbox_rebuild(commands: list[dict]) -> bool:
     ]:
         return False
     if (
-        destructive.get("switchConditionVariable") != "Action"
+        not destructive.get("switchIdentity")
+        or not destructive.get("switchClauseIdentity")
+        or destructive.get("switchConditionVariable") != "Action"
         or destructive.get("switchClauseLabel") != "Rebuild"
         or destructive.get("switchClauseLabelAstType") != "StringConstantExpressionAst"
         or destructive.get("switchClauseDirectCommandIndex", -1) < 0
@@ -874,7 +908,10 @@ def has_structurally_guarded_sandbox_rebuild(commands: list[dict]) -> bool:
         (
             command
             for command in commands
-            if command.get("switchConditionVariable") == "Action"
+            if command.get("switchIdentity") == destructive["switchIdentity"]
+            and command.get("switchClauseIdentity")
+            == destructive["switchClauseIdentity"]
+            and command.get("switchConditionVariable") == "Action"
             and command.get("switchClauseLabel") == "Rebuild"
             and command.get("switchClauseLabelAstType") == "StringConstantExpressionAst"
             and command.get("switchClauseDirectCommandIndex", -1) >= 0
@@ -1008,6 +1045,54 @@ SANDBOX_REBUILD_CLAUSE = """  'Rebuild' {
 def sandbox_rebuild_mutant(source: str, mutation: str) -> str:
     destructive = "Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')"
     assert source.count(SANDBOX_REBUILD_CLAUSE) == 1
+    split_rebuild = """  'Rebuild' {
+    $padding0 = 'inert'
+    $padding1 = 'inert'
+    $padding2 = 'inert'
+    Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')
+    Invoke-Compose -ComposeArgs @('up', '-d', '--build')
+    Wait-MysqlHealthy
+  }"""
+    guard_clause = """  'Rebuild' {
+    Assert-DockerReady
+    Assert-DestructiveTargets
+    Ensure-EnvFile
+  }"""
+    if mutation == "dead_function_clause_split":
+        decoy = """function Get-DecoyRebuildGuards {
+  switch ($Action) {
+  'Rebuild' {
+    Assert-DockerReady
+    Assert-DestructiveTargets
+    Ensure-EnvFile
+  }
+  }
+}
+
+"""
+        source = source.replace(SANDBOX_REBUILD_CLAUSE, split_rebuild)
+        return source.replace("Set-Location -LiteralPath $ProjectRoot", decoy + "Set-Location -LiteralPath $ProjectRoot", 1)
+    if mutation == "repeated_rebuild_clause_split":
+        return source.replace(
+            SANDBOX_REBUILD_CLAUSE,
+            guard_clause + "\n" + split_rebuild,
+        )
+    if mutation == "nested_rebuild_clause_split":
+        nested_split = """  'Rebuild' {
+    switch ($Action) {
+      'Rebuild' {
+        Assert-DockerReady
+        Assert-DestructiveTargets
+        Ensure-EnvFile
+      }
+    }
+    $padding1 = 'inert'
+    $padding2 = 'inert'
+    Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')
+    Invoke-Compose -ComposeArgs @('up', '-d', '--build')
+    Wait-MysqlHealthy
+  }"""
+        return source.replace(SANDBOX_REBUILD_CLAUSE, nested_split)
     if mutation == "duplicate":
         return source + "\n" + destructive + "\n"
     if mutation == "top_level":
@@ -1298,7 +1383,7 @@ def test_source_enumeration_detects_duplicate_supported_entry_points(
     canonical = tmp_path / "rollback-environment.ps1"
     duplicate = tmp_path / f"duplicate{suffix}"
     canonical.write_text(
-        "$Marker = '^Bind sandbox Rebuild exception to its guard$'",
+        "$Marker = '^Bind Rebuild guard to one AST clause$'",
         encoding="utf-8",
     )
     duplicate.write_text("powershell ./rollback-environment.ps1", encoding="utf-8")
@@ -1344,6 +1429,9 @@ def test_repository_allowed_sources_pass_language_specific_semantic_gate() -> No
 @pytest.mark.parametrize(
     "mutation",
     [
+        "dead_function_clause_split",
+        "repeated_rebuild_clause_split",
+        "nested_rebuild_clause_split",
         "duplicate",
         "top_level",
         "other_branch",
@@ -1504,7 +1592,7 @@ def test_design_status_and_documented_exclusion_order_are_current() -> None:
 def test_final_marker_and_dev045_correct_published_dev044_counts() -> None:
     helper = ROLLBACK.read_text(encoding="utf-8")
     log = DEV_LOG.read_text(encoding="utf-8")
-    assert helper.count("$Marker = '^Bind sandbox Rebuild exception to its guard$'") == 1
+    assert helper.count("$Marker = '^Bind Rebuild guard to one AST clause$'") == 1
     assert log.count("## DEV-20260721-045：") == 1
     dev045 = log.split("## DEV-20260721-045：", 1)[1]
     assert "DEV-044" in dev045 and "更正" in dev045
@@ -1529,6 +1617,16 @@ def test_dev047_is_appended_exactly_once() -> None:
     assert "Bind sandbox Rebuild exception to its guard" in dev047
     assert "94 passed" in dev047
     assert "85 passed, 70 skipped" in dev047
+
+
+def test_dev048_is_appended_exactly_once() -> None:
+    log = DEV_LOG.read_text(encoding="utf-8")
+    assert log.count("## DEV-20260721-048：") == 1
+    dev048 = log.split("## DEV-20260721-048：", 1)[1]
+    assert "Bind Rebuild guard to one AST clause" in dev048
+    assert "3 failed, 94 deselected" in dev048
+    assert "3 passed, 94 deselected" in dev048
+    assert "15 passed, 82 deselected" in dev048
 
 
 @pytest.mark.skipif(
