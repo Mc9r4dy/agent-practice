@@ -46,7 +46,7 @@ def test_rollback_has_one_documented_entry_point_and_one_executable_source() -> 
     assert ROLLBACK.is_file(), "canonical rollback helper must be versioned"
     helper = ROLLBACK.read_text(encoding="utf-8")
     assert helper.count("$Base = '25351d020a9ef413d9288010028acba579fe7938'") == 1
-    assert helper.count("$Marker = '^Enforce repository-wide rollback source uniqueness$'") == 1
+    assert helper.count("$Marker = '^Bind sandbox Rebuild exception to its guard$'") == 1
     for duplicate_source in (usage, plan):
         assert "25351d020a9ef413d9288010028acba579fe7938" not in duplicate_source
         assert "^Close final Dev Container review gaps$" not in duplicate_source
@@ -193,7 +193,7 @@ def create_isolated_rollback_repository(tmp_path: Path) -> dict:
     (work / "stage.txt").write_text("environment-two\n", encoding="utf-8")
     log.write_bytes(log.read_bytes() + b"pre-rollback-entry\r\n")
     git(work, "add", "stage.txt", str(log.relative_to(work)))
-    git(work, "commit", "-m", "Enforce repository-wide rollback source uniqueness")
+    git(work, "commit", "-m", "Bind sandbox Rebuild exception to its guard")
     head = git(work, "rev-parse", "HEAD")
     original_log = log.read_bytes()
 
@@ -218,7 +218,7 @@ def isolated_scenario(repo: dict, edited_log: bytes | None = None) -> dict:
         "mode": "isolated",
         "expectedRoot": str(repo["work"]),
         "base": repo["base"],
-        "marker": "^Enforce repository-wide rollback source uniqueness$",
+        "marker": "^Bind sandbox Rebuild exception to its guard$",
         "logPath": str(repo["log"].relative_to(repo["work"])).replace("\\", "/"),
         "mysql57": {"status": "Running", "pid": 4242},
         "listeners3306": [
@@ -641,6 +641,71 @@ function Get-ConstantsBefore {
     return $constants
 }
 
+function Get-VariableName {
+    param($Node)
+    if ($null -eq $Node) { return $null }
+    if ($Node -is [Management.Automation.Language.VariableExpressionAst]) {
+        return $Node.VariablePath.UserPath
+    }
+    if ($Node -is [Management.Automation.Language.CommandExpressionAst]) {
+        return Get-VariableName $Node.Expression
+    }
+    if ($Node -is [Management.Automation.Language.ParenExpressionAst]) {
+        return Get-VariableName $Node.Pipeline
+    }
+    if ($Node -is [Management.Automation.Language.PipelineAst] -and
+        $Node.PipelineElements.Count -eq 1) {
+        return Get-VariableName $Node.PipelineElements[0]
+    }
+    return $null
+}
+
+function Get-SwitchClauseFacts {
+    param($Command)
+    $switch = $Command.Parent
+    while ($null -ne $switch -and
+        $switch -isnot [Management.Automation.Language.SwitchStatementAst]) {
+        $switch = $switch.Parent
+    }
+    if ($null -eq $switch) {
+        return [pscustomobject]@{
+            conditionVariable = $null
+            label = $null
+            labelAstType = $null
+            directCommandIndex = -1
+        }
+    }
+    foreach ($clause in @($switch.Clauses)) {
+        $labelAst = $clause.Item1
+        $body = $clause.Item2
+        if ($Command.Extent.StartOffset -lt $body.Extent.StartOffset -or
+            $Command.Extent.EndOffset -gt $body.Extent.EndOffset) {
+            continue
+        }
+        $directIndex = -1
+        for ($index = 0; $index -lt $body.Statements.Count; $index++) {
+            if ([object]::ReferenceEquals($body.Statements[$index], $Command.Parent)) {
+                $directIndex = $index
+                break
+            }
+        }
+        return [pscustomobject]@{
+            conditionVariable = Get-VariableName $switch.Condition
+            label = if ($labelAst -is [Management.Automation.Language.StringConstantExpressionAst]) {
+                [string]$labelAst.Value
+            } else { $null }
+            labelAstType = $labelAst.GetType().Name
+            directCommandIndex = $directIndex
+        }
+    }
+    return [pscustomobject]@{
+        conditionVariable = Get-VariableName $switch.Condition
+        label = $null
+        labelAstType = $null
+        directCommandIndex = -1
+    }
+}
+
 $commands = @($ast.FindAll({
     param($node)
     $node -is [Management.Automation.Language.CommandAst]
@@ -672,12 +737,17 @@ $commands = @($ast.FindAll({
     while ($null -ne $ancestor -and $ancestor -isnot [Management.Automation.Language.FunctionDefinitionAst]) {
         $ancestor = $ancestor.Parent
     }
+    $switchClause = Get-SwitchClauseFacts $_
     [pscustomobject]@{
         name = $_.GetCommandName()
         text = $_.Extent.Text
         line = $_.Extent.StartLineNumber
         functionName = if ($null -eq $ancestor) { $null } else { $ancestor.Name }
         resolvedTokens = @($resolvedTokens)
+        switchConditionVariable = $switchClause.conditionVariable
+        switchClauseLabel = $switchClause.label
+        switchClauseLabelAstType = $switchClause.labelAstType
+        switchClauseDirectCommandIndex = $switchClause.directCommandIndex
     }
 })
 ConvertTo-Json -Compress -Depth 5 -InputObject $commands
@@ -756,24 +826,69 @@ def executable_tokens(command_text: str) -> list[str]:
     ]
 
 
+def is_dangerous_ast_command(command: dict) -> bool:
+    tokens = executable_tokens(command["text"])
+    tokens.extend(token.lower() for token in command.get("resolvedTokens", []))
+    joined = " ".join(tokens)
+    return (
+        ("git" in tokens and "reset" in tokens and "--hard" in tokens)
+        or ("git" in tokens and "clean" in tokens and any(t.startswith("-fd") for t in tokens))
+        or ("git" in tokens and "push" in tokens and any(t.startswith("--force") for t in tokens))
+        or ("docker" in tokens and "system" in tokens and "prune" in tokens)
+        or ("docker" in tokens and "volume" in tokens and "prune" in tokens)
+        or ("docker" in tokens and "down" in tokens and "--volumes" in tokens)
+        or ("invoke-compose" in tokens and "down" in tokens and "--volumes" in tokens)
+        or "quickreset" in joined
+    )
+
+
 def dangerous_ast_commands(commands: list[dict]) -> list[str]:
-    dangerous: list[str] = []
-    for command in commands:
-        tokens = executable_tokens(command["text"])
-        tokens.extend(token.lower() for token in command.get("resolvedTokens", []))
-        joined = " ".join(tokens)
-        if (
-            ("git" in tokens and "reset" in tokens and "--hard" in tokens)
-            or ("git" in tokens and "clean" in tokens and any(t.startswith("-fd") for t in tokens))
-            or ("git" in tokens and "push" in tokens and any(t.startswith("--force") for t in tokens))
-            or ("docker" in tokens and "system" in tokens and "prune" in tokens)
-            or ("docker" in tokens and "volume" in tokens and "prune" in tokens)
-            or ("docker" in tokens and "down" in tokens and "--volumes" in tokens)
-            or ("invoke-compose" in tokens and "down" in tokens and "--volumes" in tokens)
-            or "quickreset" in joined
-        ):
-            dangerous.append(command["text"])
-    return dangerous
+    return [command["text"] for command in commands if is_dangerous_ast_command(command)]
+
+
+def resolved_command_tokens(command: dict) -> list[str]:
+    return [token.lower() for token in command.get("resolvedTokens", [])]
+
+
+def has_structurally_guarded_sandbox_rebuild(commands: list[dict]) -> bool:
+    dangerous = [command for command in commands if is_dangerous_ast_command(command)]
+    if len(dangerous) != 1:
+        return False
+    destructive = dangerous[0]
+    if resolved_command_tokens(destructive) != [
+        "invoke-compose",
+        "down",
+        "--volumes",
+        "--remove-orphans",
+    ]:
+        return False
+    if (
+        destructive.get("switchConditionVariable") != "Action"
+        or destructive.get("switchClauseLabel") != "Rebuild"
+        or destructive.get("switchClauseLabelAstType") != "StringConstantExpressionAst"
+        or destructive.get("switchClauseDirectCommandIndex", -1) < 0
+    ):
+        return False
+
+    rebuild_commands = sorted(
+        (
+            command
+            for command in commands
+            if command.get("switchConditionVariable") == "Action"
+            and command.get("switchClauseLabel") == "Rebuild"
+            and command.get("switchClauseLabelAstType") == "StringConstantExpressionAst"
+            and command.get("switchClauseDirectCommandIndex", -1) >= 0
+        ),
+        key=lambda command: command["switchClauseDirectCommandIndex"],
+    )
+    return [resolved_command_tokens(command) for command in rebuild_commands] == [
+        ["assert-dockerready"],
+        ["assert-destructivetargets"],
+        ["ensure-envfile"],
+        ["invoke-compose", "down", "--volumes", "--remove-orphans"],
+        ["invoke-compose", "up", "-d", "--build"],
+        ["wait-mysqlhealthy"],
+    ]
 
 
 def resolved_rollback_entry_points(commands: list[dict]) -> list[str]:
@@ -875,8 +990,61 @@ def unapproved_dangerous_commands(relative: Path, commands: list[dict]) -> list[
     sandbox = Path(ROOT.name) / "scripts/sandbox.ps1"
     if relative != sandbox:
         return dangerous
-    guarded_rebuild = "Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')"
-    return [command for command in dangerous if command != guarded_rebuild]
+    if has_structurally_guarded_sandbox_rebuild(commands):
+        return []
+    return dangerous or ["sandbox Rebuild structural guard binding is missing"]
+
+
+SANDBOX_REBUILD_CLAUSE = """  'Rebuild' {
+    Assert-DockerReady
+    Assert-DestructiveTargets
+    Ensure-EnvFile
+    Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')
+    Invoke-Compose -ComposeArgs @('up', '-d', '--build')
+    Wait-MysqlHealthy
+  }"""
+
+
+def sandbox_rebuild_mutant(source: str, mutation: str) -> str:
+    destructive = "Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')"
+    assert source.count(SANDBOX_REBUILD_CLAUSE) == 1
+    if mutation == "duplicate":
+        return source + "\n" + destructive + "\n"
+    if mutation == "top_level":
+        replacement = SANDBOX_REBUILD_CLAUSE.replace("    " + destructive + "\n", "")
+        return source.replace(SANDBOX_REBUILD_CLAUSE, replacement) + "\n" + destructive + "\n"
+    if mutation == "other_branch":
+        replacement = SANDBOX_REBUILD_CLAUSE.replace("    " + destructive + "\n", "")
+        source = source.replace(SANDBOX_REBUILD_CLAUSE, replacement)
+        return source.replace("  'Stop' {", "  'Stop' {\n    " + destructive, 1)
+    replacements = {
+        "guard_deleted": SANDBOX_REBUILD_CLAUSE.replace(
+            "    Assert-DestructiveTargets\n", ""
+        ),
+        "guard_after": SANDBOX_REBUILD_CLAUSE.replace(
+            "    Assert-DestructiveTargets\n    Ensure-EnvFile\n    " + destructive,
+            "    Ensure-EnvFile\n    " + destructive + "\n    Assert-DestructiveTargets",
+        ),
+        "guard_comment": SANDBOX_REBUILD_CLAUSE.replace(
+            "    Assert-DestructiveTargets", "    # Assert-DestructiveTargets"
+        ),
+        "guard_string": SANDBOX_REBUILD_CLAUSE.replace(
+            "    Assert-DestructiveTargets", "    'Assert-DestructiveTargets'"
+        ),
+        "preconditions_reordered": SANDBOX_REBUILD_CLAUSE.replace(
+            "    Assert-DockerReady\n    Assert-DestructiveTargets\n    Ensure-EnvFile",
+            "    Ensure-EnvFile\n    Assert-DockerReady\n    Assert-DestructiveTargets",
+        ),
+        "dangerous_vector_changed": SANDBOX_REBUILD_CLAUSE.replace(
+            destructive,
+            "Invoke-Compose -ComposeArgs @('down', '--remove-orphans')",
+        ),
+        "rebuild_tail_changed": SANDBOX_REBUILD_CLAUSE.replace(
+            "    Invoke-Compose -ComposeArgs @('up', '-d', '--build')\n    Wait-MysqlHealthy",
+            "    Wait-MysqlHealthy\n    Invoke-Compose -ComposeArgs @('up', '-d', '--build')",
+        ),
+    }
+    return source.replace(SANDBOX_REBUILD_CLAUSE, replacements[mutation])
 
 
 @pytest.mark.skipif(
@@ -1130,7 +1298,7 @@ def test_source_enumeration_detects_duplicate_supported_entry_points(
     canonical = tmp_path / "rollback-environment.ps1"
     duplicate = tmp_path / f"duplicate{suffix}"
     canonical.write_text(
-        "$Marker = '^Enforce repository-wide rollback source uniqueness$'",
+        "$Marker = '^Bind sandbox Rebuild exception to its guard$'",
         encoding="utf-8",
     )
     duplicate.write_text("powershell ./rollback-environment.ps1", encoding="utf-8")
@@ -1167,6 +1335,55 @@ def test_repository_has_exactly_one_supported_executable_rollback_source() -> No
 )
 def test_repository_allowed_sources_pass_language_specific_semantic_gate() -> None:
     assert repository_source_gate_findings(ROOT) == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="sandbox Rebuild structural AST gate runs on the Windows host",
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate",
+        "top_level",
+        "other_branch",
+        "guard_deleted",
+        "guard_after",
+        "guard_comment",
+        "guard_string",
+        "preconditions_reordered",
+        "dangerous_vector_changed",
+        "rebuild_tail_changed",
+    ],
+)
+def test_repository_gate_rejects_unguarded_or_changed_sandbox_rebuild_mutants(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repository = create_repository_source_fixture(tmp_path)
+    sandbox = repository / ROOT.name / "scripts/sandbox.ps1"
+    source = sandbox.read_text(encoding="utf-8")
+    sandbox.write_text(sandbox_rebuild_mutant(source, mutation), encoding="utf-8")
+    findings = repository_source_gate_findings(repository / ROOT.name)
+    assert any("sandbox.ps1" in finding for finding in findings), mutation
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="sandbox Rebuild structural AST gate runs on the Windows host",
+)
+def test_repository_gate_accepts_guarded_rebuild_with_inert_text_controls(
+    tmp_path: Path,
+) -> None:
+    repository = create_repository_source_fixture(tmp_path)
+    sandbox = repository / ROOT.name / "scripts/sandbox.ps1"
+    sandbox.write_text(
+        sandbox.read_text(encoding="utf-8")
+        + "\n# Invoke-Compose -ComposeArgs @('down', '--volumes', '--remove-orphans')\n"
+        + "$documentation = 'Assert-DestructiveTargets after down --volumes'\n",
+        encoding="utf-8",
+    )
+    assert repository_source_gate_findings(repository / ROOT.name) == []
 
 
 @pytest.mark.skipif(
@@ -1287,7 +1504,7 @@ def test_design_status_and_documented_exclusion_order_are_current() -> None:
 def test_final_marker_and_dev045_correct_published_dev044_counts() -> None:
     helper = ROLLBACK.read_text(encoding="utf-8")
     log = DEV_LOG.read_text(encoding="utf-8")
-    assert helper.count("$Marker = '^Enforce repository-wide rollback source uniqueness$'") == 1
+    assert helper.count("$Marker = '^Bind sandbox Rebuild exception to its guard$'") == 1
     assert log.count("## DEV-20260721-045：") == 1
     dev045 = log.split("## DEV-20260721-045：", 1)[1]
     assert "DEV-044" in dev045 and "更正" in dev045
@@ -1303,6 +1520,15 @@ def test_dev046_is_appended_exactly_once() -> None:
     dev046 = log.split("## DEV-20260721-046：", 1)[1]
     assert "82 passed in 199.38s" in dev046
     assert "84 passed, 59 skipped in 5.63s" in dev046
+
+
+def test_dev047_is_appended_exactly_once() -> None:
+    log = DEV_LOG.read_text(encoding="utf-8")
+    assert log.count("## DEV-20260721-047：") == 1
+    dev047 = log.split("## DEV-20260721-047：", 1)[1]
+    assert "Bind sandbox Rebuild exception to its guard" in dev047
+    assert "94 passed" in dev047
+    assert "85 passed, 70 skipped" in dev047
 
 
 @pytest.mark.skipif(
